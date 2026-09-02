@@ -14,6 +14,8 @@
     <meta property="og:url" content="https://alipayclaw.cn/download/" />
     <meta property="og:title" content="下载牛马办公 macOS 版" />
     <meta property="og:description" content="了解牛马办公 macOS 版的系统要求、安装方式与发布状态。" />
+    <meta property="og:site_name" content="牛马办公" />
+    <meta name="twitter:card" content="summary" />
     <link rel="icon" href="/brand/niuma-app-icon-v3.png" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
@@ -26,7 +28,7 @@
           ></a
         >
         <div class="nav-links">
-          <a href="/">首页</a><a href="/help/">帮助</a>
+          <a href="/">首页</a><a href="/guide/">使用指南</a>
         </div>
       </nav>
     </header>
@@ -35,17 +37,23 @@
         <section class="download-card">
           <span class="eyebrow">内部体验版</span>
           <h1>牛马办公<br />macOS 版</h1>
-          <p class="lead" style="margin: 0; text-align: left">
-            当前版本通过内部渠道定向交付。每个安装包都会附带对应版本说明和完整性校验信息。
+          <p class="lead download-lead">
+            Apple Silicon 内部体验包已经完成构建与完整性校验。当前版本未使用 Apple Developer 签名，请先阅读下方首次打开方式。
           </p>
           <div class="requirements">
             <strong>系统要求</strong><span>macOS 13 Ventura 或更高版本</span
             ><span>Apple Silicon 版本优先提供</span
-            ><span>建议至少预留 2 GB 可用空间</span>
+            ><span>版本 0.1.0 · Apple Silicon · ZIP 439.7 MB</span>
           </div>
-          <p class="download-note">
-            内部体验包将在完成版本校验与安装验证后开放定向下载。当前安装包尚未使用 Apple Developer 签名，下载页会同时提供 SHA-256 与 macOS 首次打开说明。
-          </p>
+          <div class="actions download-actions">
+            <a class="button" href="https://download.alipayclaw.cn/releases/0.1.0/niuma-office-0.1.0-mac-arm64-internal.zip">下载 Apple Silicon 版</a>
+            <a class="button secondary" href="/guide/">查看安装指南</a>
+          </div>
+          <dl class="release-facts">
+            <div><dt>发布状态</dt><dd>未签名内部体验版</dd></div>
+            <div><dt>SHA-256</dt><dd><code>2d19dd7e539fe386758ab33bd0c45523890a2860f4ca977732369eddb93427ea</code></dd></div>
+          </dl>
+          <p class="download-note">首次打开时，请在访达中找到“牛马办公”，按住 Control 键点按应用并选择“打开”。无需关闭 Gatekeeper，也不要修改系统全局安全设置。</p>
         </section>
         <figure class="product-frame">
           <img

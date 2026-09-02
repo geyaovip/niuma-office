@@ -1,0 +1,19 @@
+{
+  "product": "牛马办公",
+  "channel": "internal",
+  "version": "0.1.0",
+  "releasedAt": "2026-09-02T04:45:12Z",
+  "minimumMacOS": "13.0",
+  "signature": "unsigned",
+  "notarized": false,
+  "artifacts": [
+    {
+      "architecture": "arm64",
+      "format": "zip",
+      "fileName": "niuma-office-0.1.0-mac-arm64-internal.zip",
+      "url": "https://download.alipayclaw.cn/releases/0.1.0/niuma-office-0.1.0-mac-arm64-internal.zip",
+      "sizeBytes": 461072225,
+      "sha256": "2d19dd7e539fe386758ab33bd0c45523890a2860f4ca977732369eddb93427ea"
+    }
+  ]
+}

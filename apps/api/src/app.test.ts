@@ -68,7 +68,7 @@ describe("channel API", () => {
     const { TELEGRAM_BOT_TOKEN: _token, TELEGRAM_BOT_USERNAME: _username, TELEGRAM_WEBHOOK_SECRET: _secret, ...withoutTelegram } = config;
     const app = createApp(withoutTelegram, {} as never);
     const response = await app.inject({ method: "GET", url: "/health" });
-    expect(response.json()).toEqual({ status: "ok", capabilities: { modelGateway: false, telegram: false } });
+    expect(response.json()).toEqual({ status: "ok", capabilities: { modelGateway: false, telegram: false, feishu: false } });
     expect((await app.inject({ method: "POST", url: "/v1/webhooks/telegram", payload: {} })).statusCode).toBe(404);
     await app.close();
   });

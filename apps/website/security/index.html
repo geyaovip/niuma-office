@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>牛马办公安全说明 - 本地执行与权限边界</title>
+    <meta name="description" content="了解牛马办公的本地执行、工作空间权限、模型调用、API Key 与高风险操作确认机制。" />
+    <meta name="robots" content="index,follow" />
+    <link rel="canonical" href="https://alipayclaw.cn/security/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="https://alipayclaw.cn/security/" />
+    <meta property="og:title" content="牛马办公安全说明" />
+    <meta property="og:description" content="本地执行、文件权限、模型调用和密钥保护边界。" />
+    <meta property="og:site_name" content="牛马办公" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="icon" href="/brand/niuma-app-icon-v3.png" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="site-header"><nav class="nav shell" aria-label="主导航"><a class="brand" href="/"><img src="/brand/niuma-mascot-mark-v3.png" alt="牛马办公 Logo" /><span>牛马办公</span></a><div class="nav-links"><a href="/">首页</a><a href="/guide/">使用指南</a><a aria-current="true" href="/security/">安全</a></div><a class="nav-action" href="/download/">下载</a></nav></header>
+    <main class="document-page">
+      <article class="document shell">
+        <h1>安全说明</h1>
+        <p class="updated">当前版本的数据与权限边界</p>
+        <h2>任务在当前 Mac 上执行</h2>
+        <p>任务会话、项目文件、默认工作空间和交付产物保存在当前 Mac。云端承担短时设备会话、平台模型转发和必要的消息中继，不提供 Web 任务工作台。</p>
+        <h2>文件访问以工作空间为边界</h2>
+        <p>牛马管理的默认工作空间和你明确选择的项目目录可按当前权限模式执行。访问工作空间外路径、删除或覆盖重要文件、外部发送等操作需要单独确认。</p>
+        <h2>平台模型与自定义密钥分离</h2>
+        <p>平台模型密钥只保存在服务器端，客户端只获得短时访问令牌。你添加的自定义 API Key 仅在当前 Mac 上加密保存，不上传牛马办公云端。</p>
+        <h2>底层运行时不直接暴露</h2>
+        <p>客户端通过牛马办公的产品服务和权限层调用内置运行时。普通界面不展示底层端口、配置文件、供应商 Endpoint 或平台密钥。</p>
+        <h2>诊断信息最小化</h2>
+        <p>本地诊断记录用于排查启动、任务状态和运行错误，不记录模型密钥。提交问题前仍应检查文件名、任务标题和复现内容是否包含敏感信息。</p>
+      </article>
+    </main>
+    <script type="module" src="/src/site.ts"></script>
+  </body>
+</html>

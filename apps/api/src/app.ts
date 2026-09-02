@@ -63,7 +63,14 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
     }
   };
 
-  app.get("/health", () => ({ status: "ok", capabilities: { modelGateway: Boolean(modelGateway), telegram: Boolean(telegramClient) } }));
+  app.get("/health", () => ({
+    status: "ok",
+    capabilities: {
+      modelGateway: Boolean(modelGateway),
+      telegram: Boolean(telegramClient),
+      feishu: false,
+    },
+  }));
   app.post("/v1/devices/register", safe(async (request: any) => {
     const input = deviceSchema.parse(request.body);
     authenticateRegistration(request, input);
