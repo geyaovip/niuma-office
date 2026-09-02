@@ -1,0 +1,54 @@
+import { ArrowUp, Books, CaretDown, Check, File, FolderSimple, Gear, LinkSimple, Paperclip, ShieldCheck, UsersThree, Wrench, X } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
+import { experts, expertTeams } from "../data";
+import type { ArtifactRecord, ConnectorCatalogItemRecord, KnowledgeSourceRecord, PermissionMode, ProjectRecord, SkillCatalogItemRecord } from "../types";
+
+interface Props { projects: ProjectRecord[]; skills: SkillCatalogItemRecord[]; connectors: ConnectorCatalogItemRecord[]; knowledgeSources: KnowledgeSourceRecord[]; onSubmit: (prompt: string, teamId?: string, projectId?: string, modelMode?: "auto" | "custom", attachments?: string[], permissionMode?: PermissionMode, artifactInputs?: string[], skillIds?: string[], connectorIds?: string[], knowledgeIds?: string[]) => void; compact?: boolean; disabled?: boolean; initialTeamId?: string; initialProjectId?: string; initialArtifacts?: ArtifactRecord[]; initialSkillIds?: string[]; initialConnectorIds?: string[]; initialKnowledgeIds?: string[]; onModelSettings?: () => void; suggestedPrompt?: string }
+
+export function Composer({ projects, skills, connectors, knowledgeSources, onSubmit, compact, disabled = false, initialTeamId, initialProjectId, initialArtifacts = [], initialSkillIds = [], initialConnectorIds = [], initialKnowledgeIds = [], onModelSettings, suggestedPrompt }: Props) {
+  const [prompt, setPrompt] = useState("");
+  const [teamId, setTeamId] = useState(initialTeamId || "");
+  const [projectId, setProjectId] = useState(initialProjectId || "default");
+  const [modelMode, setModelMode] = useState<"auto" | "custom">("auto");
+  const [customModelName, setCustomModelName] = useState("");
+  const [modelOpen, setModelOpen] = useState(false);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [artifactInputs, setArtifactInputs] = useState<ArtifactRecord[]>(initialArtifacts);
+  const [skillIds, setSkillIds] = useState<string[]>(initialSkillIds);
+  const [skillOpen, setSkillOpen] = useState(false);
+  const [connectorIds, setConnectorIds] = useState<string[]>(initialConnectorIds);
+  const [connectorOpen, setConnectorOpen] = useState(false);
+  const [knowledgeIds, setKnowledgeIds] = useState<string[]>(initialKnowledgeIds);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  useEffect(() => setTeamId(initialTeamId || ""), [initialTeamId]);
+  useEffect(() => setProjectId(initialProjectId || "default"), [initialProjectId]);
+  useEffect(() => { if (suggestedPrompt) setPrompt(suggestedPrompt); }, [suggestedPrompt]);
+  useEffect(() => setArtifactInputs(initialArtifacts), [initialArtifacts]);
+  useEffect(() => setSkillIds(initialSkillIds), [initialSkillIds]);
+  useEffect(() => setConnectorIds(initialConnectorIds), [initialConnectorIds]);
+  useEffect(() => setKnowledgeIds(initialKnowledgeIds), [initialKnowledgeIds]);
+  useEffect(() => { if (window.niuma) void window.niuma.getModelSettings().then(settings => { setCustomModelName(settings.hasApiKey ? settings.displayName : ""); }); }, [modelOpen]);
+  const submit = () => { const value = prompt.trim(); if (disabled || !value) return; onSubmit(value, teamId, projectId, modelMode, attachments, permissionMode, artifactInputs.map(item => item.id), skillIds, connectorIds, knowledgeIds); setPrompt(""); setAttachments([]); setArtifactInputs([]); setSkillIds([]); setConnectorIds([]); setKnowledgeIds([]); setModelOpen(false); setSkillOpen(false); setConnectorOpen(false); setKnowledgeOpen(false); };
+  const pickFiles = async () => {
+    if (disabled) return;
+    const selected = await window.niuma?.pickFiles();
+    if (selected?.length) setAttachments(current => [...new Set([...current, ...selected])].slice(0, 10));
+  };
+  return <section className={compact ? "composer compact" : "composer"}>
+    {(attachments.length > 0 || artifactInputs.length > 0) && <div className="attachment-strip">{artifactInputs.map(artifact => <span key={artifact.id}><File size={14} />{artifact.name}<button aria-label={`移除 ${artifact.name}`} onClick={() => setArtifactInputs(current => current.filter(item => item.id !== artifact.id))}><X size={12} /></button></span>)}{attachments.map(path => <span key={path}><File size={14} />{path.split(/[\\/]/).pop()}<button aria-label={`移除 ${path.split(/[\\/]/).pop()}`} onClick={() => setAttachments(current => current.filter(item => item !== path))}><X size={12} /></button></span>)}</div>}
+    <textarea aria-label="任务描述" value={prompt} disabled={disabled} onChange={event => { const value = event.target.value; if (value.endsWith("/")) { setPrompt(value.slice(0, -1)); setSkillOpen(true); } else setPrompt(value); }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder={disabled ? "当前任务正在执行，完成后可以继续补充要求" : compact ? "继续补充要求，@ 引用文件，/ 调用技能" : "告诉牛马你想完成什么，@ 引用文件，/ 调用技能"} />
+    <div className="composer-actions">
+      <div className="composer-left">
+        <button className="icon-button" title="添加文件" disabled={disabled} onClick={() => void pickFiles()}><Paperclip size={20} /></button>
+        <div className="skill-picker-wrap"><button type="button" className={skillIds.length ? "skill-picker active" : "skill-picker"} disabled={disabled} aria-haspopup="menu" aria-expanded={skillOpen} onClick={() => setSkillOpen(value => !value)}><Wrench size={18} /><span>{skillIds.length ? `技能 ${skillIds.length}` : "技能"}</span></button>{skillOpen && <div className="skill-menu" role="menu"><header><strong>选择本轮技能</strong><span>最多 5 个</span></header>{skills.filter(item => item.installation?.status === "active").length ? skills.filter(item => item.installation?.status === "active").map(item => { const selected = skillIds.includes(item.definition.id); return <button key={item.definition.id} className={selected ? "selected" : ""} onClick={() => setSkillIds(current => selected ? current.filter(id => id !== item.definition.id) : current.length < 5 ? [...current, item.definition.id] : current)}><span><strong>{item.definition.name}</strong><small>{item.definition.summary}</small></span>{selected && <Check size={15} />}</button>; }) : <p>请先在“专家·技能·连接器”中安装技能。</p>}</div>}</div>
+        {connectors.some(item => item.definition.kind === "remote_mcp" && item.installation.status === "active") && <div className="skill-picker-wrap"><button type="button" className={connectorIds.length ? "skill-picker active" : "skill-picker"} disabled={disabled} aria-haspopup="menu" aria-expanded={connectorOpen} onClick={() => setConnectorOpen(value => !value)}><LinkSimple size={18} /><span>{connectorIds.length ? `连接器 ${connectorIds.length}` : "连接器"}</span></button>{connectorOpen && <div className="skill-menu connector-picker-menu" role="menu"><header><strong>选择外部连接器</strong><span>本轮使用</span></header>{connectors.filter(item => item.definition.kind === "remote_mcp" && item.installation.status === "active").map(item => { const selected = connectorIds.includes(item.definition.id); return <button key={item.definition.id} className={selected ? "selected" : ""} onClick={() => setConnectorIds(selected ? [] : [item.definition.id])}><span><strong>{item.installation.displayName}</strong><small>只开放已审核的只读工具</small></span>{selected && <Check size={15} />}</button>; })}</div>}</div>}
+        {knowledgeSources.some(item => item.status === "ready") && <div className="skill-picker-wrap"><button type="button" className={knowledgeIds.length ? "skill-picker active" : "skill-picker"} disabled={disabled} aria-haspopup="menu" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><Books size={18} /><span>{knowledgeIds.length ? `资料 ${knowledgeIds.length}` : "资料"}</span></button>{knowledgeOpen && <div className="skill-menu knowledge-picker-menu" role="menu"><header><strong>选择本轮资料</strong><span>最多 5 份</span></header>{knowledgeSources.filter(item => item.status === "ready").map(item => { const selected = knowledgeIds.includes(item.id); return <button key={item.id} className={selected ? "selected" : ""} onClick={() => setKnowledgeIds(current => selected ? current.filter(id => id !== item.id) : current.length < 5 ? [...current, item.id] : current)}><span><strong>{item.name}</strong><small>{item.kind === "web" ? item.origin : `${item.chunkCount} 个可检索片段`}</small></span>{selected && <Check size={15} />}</button>; })}</div>}</div>}
+        <label><FolderSimple size={18} /><select aria-label="选择项目" value={projectId} disabled={disabled} onChange={e => setProjectId(e.target.value)}>{projects.map(p => <option key={p.id} value={p.id} disabled={p.status === "needs_reauthorization"}>{p.name}{p.status === "needs_reauthorization" ? "（需重新授权）" : ""}</option>)}</select></label>
+        <label><ShieldCheck size={18} /><select aria-label="选择权限模式" value={permissionMode} disabled={disabled} onChange={event => setPermissionMode(event.target.value as PermissionMode)}><option value="restricted">受限权限</option><option value="default">默认权限</option><option value="full">完全访问</option></select></label>
+        <label className="team-select"><UsersThree size={18} /><select aria-label="选择专家或专家团" value={teamId} disabled={disabled} onChange={e => setTeamId(e.target.value)}><option value="">选择专家或专家团</option><optgroup label="专家">{experts.map(expert => <option key={expert.id} value={`expert:${expert.id}`}>{expert.name}</option>)}</optgroup><optgroup label="专家团">{expertTeams.map(team => <option key={team.id} value={`team:${team.id}`}>{team.name}</option>)}</optgroup></select><CaretDown size={13} /></label>
+      </div>
+      <div className="composer-right"><div className="model-picker-wrap"><button className="model-picker" type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={modelOpen} onClick={() => setModelOpen(value => !value)}><span>{modelMode === "custom" ? customModelName || "自定义模型" : "Auto"}</span><CaretDown size={13} /></button>{modelOpen && <div className="model-menu" role="menu"><button className={modelMode === "auto" ? "selected" : ""} onClick={() => { setModelMode("auto"); setModelOpen(false); }}><span><strong>Auto</strong><small>由牛马自动选择合适的能力</small></span>{modelMode === "auto" && <Check size={16} />}</button>{customModelName && <button className={modelMode === "custom" ? "selected" : ""} onClick={() => { setModelMode("custom"); setModelOpen(false); }}><span><strong>{customModelName}</strong><small>你的自定义模型</small></span>{modelMode === "custom" && <Check size={16} />}</button>}<button className="model-menu-settings" onClick={() => { setModelOpen(false); onModelSettings?.(); }}><Gear size={16} />模型设置</button></div>}</div><button className="send-button" aria-label="发送任务" disabled={disabled || !prompt.trim()} onClick={submit}><ArrowUp size={20} weight="bold" /></button></div>
+    </div>
+  </section>;
+}

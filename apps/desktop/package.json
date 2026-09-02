@@ -1,0 +1,91 @@
+{
+  "name": "@niuma/desktop",
+  "version": "0.1.0",
+  "description": "面向团队与个人的智能办公桌面应用",
+  "author": "牛马办公",
+  "private": true,
+  "type": "module",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -s first \"vite --port 5173 --strictPort\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev:renderer": "vite --port 5173 --strictPort",
+    "build:renderer": "vite build",
+    "build:electron": "node scripts/clean-electron-build.mjs && tsc -p electron/tsconfig.json",
+    "build": "npm --workspace @niuma/contracts run build && npm --workspace @niuma/channel-adapter run build && npm run check && npm run build:renderer && npm run build:electron",
+    "preview": "vite preview --port 4173 --strictPort",
+    "start": "electron .",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p electron/tsconfig.json",
+    "test": "vitest run src electron",
+    "test:runtime-config": "NIUMA_MODEL_ACCESS_TOKEN=test OPENCLAW_GATEWAY_TOKEN=test OPENCLAW_CONFIG_PATH=tests/fixtures/openclaw-valid.json runtime/node/bin/node runtime/openclaw/node_modules/openclaw/openclaw.mjs config validate --json",
+    "pack:mac": "npm run build && electron-builder --mac dir",
+    "runtime:prepare": "node scripts/prepare-openclaw-runtime.mjs",
+    "package:mac-dir": "electron-builder --mac dir",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip"
+  },
+  "dependencies": {
+    "@niuma/channel-adapter": "0.1.0",
+    "@niuma/contracts": "0.1.0",
+    "@openclaw/gateway-client": "2026.8.2",
+    "@openclaw/gateway-protocol": "2026.8.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "html-to-text": "10.0.1",
+    "mammoth": "1.12.2",
+    "pdfjs-dist": "6.3.289",
+    "qrcode": "1.5.4",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/html-to-text": "9.0.4",
+    "@types/node": "^24.10.1",
+    "@types/qrcode": "1.5.6",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "5.0.4",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "41.10.7",
+    "electron-builder": "^26.0.12",
+    "jszip": "3.10.1",
+    "pdf-lib": "1.17.1",
+    "typescript": "^5.9.3",
+    "vite": "6.4.3",
+    "vitest": "^4.0.8",
+    "wait-on": "^9.0.1"
+  },
+  "build": {
+    "appId": "cn.niuma.office",
+    "productName": "牛马办公",
+    "asar": true,
+    "files": [
+      "dist/client/**/*",
+      "dist/electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "牛马办公 ${version}"
+    }
+  }
+}

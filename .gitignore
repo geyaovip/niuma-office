@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+node_modules/
+dist/
+apps/desktop/runtime/
+apps/*/dist/
+.codex/run/
+npm-debug.log*
+
+# dependencies and build output
+node_modules/
+dist/
+out/
+.turbo/
+coverage/
+
+# local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.mobileprovision
+
+# runtime data and diagnostics
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+logs/
+crash-reports/
+
+# editor-local files
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,28 @@
+{
+  "name": "@niuma/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "vitest run src"
+  },
+  "dependencies": {
+    "@niuma/channel-adapter": "0.1.0",
+    "@niuma/contracts": "0.1.0",
+    "fastify": "5.12.1",
+    "pg": "8.23.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.8"
+  }
+}

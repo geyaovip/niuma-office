@@ -1,0 +1,20 @@
+{
+  "name": "niuma-office",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:desktop": "npm --workspace @niuma/desktop run dev",
+    "build:desktop": "npm --workspace @niuma/desktop run build",
+    "test:desktop": "npm --workspace @niuma/desktop run test",
+    "dev:website": "npm --workspace @niuma/website run dev",
+    "build:website": "npm --workspace @niuma/website run build",
+    "check": "npm --workspace @niuma/contracts run build && npm --workspace @niuma/channel-adapter run build && npm --workspaces --if-present run check && ./scripts/check-docs.sh"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
