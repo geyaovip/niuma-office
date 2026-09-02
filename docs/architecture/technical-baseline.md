@@ -28,7 +28,7 @@ Cloud
 ```text
 apps/
   desktop/          Electron macOS 客户端
-  website/          正式官网、下载、帮助与法律页面
+  website/          正式官网、下载、指南、安全与版本页面
   api/              云端 API、消息中继和未来认证
   admin/            管理后台
 packages/
@@ -225,4 +225,4 @@ Feishu/Telegram webhook or update
 - 知识库 PDF/DOCX/Markdown/TXT/网页解析、中文检索、格式限制、私网与 DNS 重绑定边界、解析中断恢复、来源摘要变化和 Task 引用注入测试
 - Telegram/飞书私聊、群聊提及、重复消息、二维码过期、解绑和离线 24h 队列测试
 - macOS 未签名内部包的下载、SHA-256、安装提示、首次打开、升级和卸载后数据保留测试；正式发布阶段另执行签名、Notarization、Gatekeeper 和更新签名测试
-- 官网桌面/移动布局、真实下载、状态码、重定向、Canonical、初始 HTML、结构化数据、站点地图、索引指令、法律链接、无障碍与 Core Web Vitals 检查
+- 官网桌面/移动布局、真实下载、状态码、重定向、Canonical、初始 HTML、结构化数据、站点地图、索引指令、无障碍与 Core Web Vitals 检查

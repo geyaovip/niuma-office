@@ -16,4 +16,4 @@ Telegram 与飞书尚未配置时不创建相关 Secret，也不开放 Webhook �
 
 ## 官网发布门禁
 
-官网构建入口为 `apps/website/site.routes.mjs`，SEO、站内路由和下载清单一致性由 `npm --workspace @niuma/website run check` 统一检查。根域名发布前必须关闭 `OQ-010`：确认运营主体、公开联系方式、备案信息和经审核的隐私政策/用户协议。技术预览或自动检查通过不代表可以把草案法律文本发布到生产域名。
+官网构建入口为 `apps/website/site.routes.mjs`，SEO、站内路由和下载清单一致性由 `npm --workspace @niuma/website run check` 统一检查。当前官网无需登录，不发布用户协议、隐私政策、公开联系方式、ICP备案展示、表单或第三方统计；只部署路由清单中登记的精简信息页。Google Search Console 等搜索平台验收后置，不阻塞基础 SEO 和根域名发布。

@@ -50,6 +50,10 @@ if (!robots.includes(`Sitemap: ${origin}/sitemap.xml`)) fail("robots.txt 未声�
 const notFound = await readFile(join(root, "404.html"), "utf8");
 if (!/name="robots"\s+content="noindex,nofollow"/i.test(notFound)) fail("404 页面必须禁止索引");
 
+const edgeWorker = await readFile(join(root, "public/_worker.js"), "utf8");
+if (!edgeWorker.includes('url.hostname === "www.alipayclaw.cn"')) fail("边缘入口缺少 www 到根域名跳转");
+if (!edgeWorker.includes("Content-Security-Policy")) fail("边缘入口缺少基础安全响应头");
+
 const releaseManifest = JSON.parse(
   await readFile(join(root, "../../deploy/release-manifest.json"), "utf8"),
 );
