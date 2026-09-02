@@ -8,15 +8,24 @@ import type { ApiConfig } from "./config.js";
 import type { ChannelRepository } from "./channel-repository.js";
 import { createTelegramEnvelope, parseTelegramUpdate, TelegramClient, type TelegramUpdate } from "./telegram.js";
 
-type ChannelStore = Pick<ChannelRepository, "registerDevice" | "publicKey" | "createPairing" | "pairing" | "cancelPairing" | "consumeTelegram" | "bindingForTelegram" | "listBindings" | "revokeBinding" | "enqueue" | "pull" | "acknowledge" | "markOutbound" | "createModelSession" | "consumeModelSession"> & Partial<Pick<ChannelRepository, "pendingOutbound">>;
+type ChannelStore = Pick<ChannelRepository, "registerDevice" | "publicKey" | "createPairing" | "pairing" | "cancelPairing" | "consumeTelegram" | "bindingForTelegram" | "listBindings" | "revokeBinding" | "enqueue" | "pull" | "acknowledge" | "markOutbound" | "createModelSession" | "consumeModelSession"> & Partial<Pick<ChannelRepository, "pendingOutbound" | "currentPublicConfig" | "writePublicConfig" | "publicConfigHistory">>;
 type TelegramTransport = Pick<TelegramClient, "deepLink" | "sendMessage">;
 export interface ModelGatewayOptions { apiKey: string; modelId: string; baseUrl: string; fetcher?: typeof fetch }
+export interface AdminOptions { token: string }
 
 const deviceSchema = z.object({ deviceInstallationId: z.string().uuid(), publicKeyPem: z.string().min(80).max(10_000), createdAt: z.string().datetime() });
 const ackSchema = z.object({ taskId: z.string().min(1).max(200), state: z.enum(["accepted", "running", "waiting_user", "completed", "failed"]), summary: z.string().max(3000).optional() });
 const modelRequestSchema = z.object({ model: z.string().optional(), messages: z.array(z.unknown()).min(1).max(500) }).loose();
+const publicConfigSchema = z.object({
+  minimumClientVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  latestClientVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  capabilities: z.object({ telegram: z.boolean(), feishu: z.boolean() }),
+  models: z.array(z.object({ id: z.string().regex(/^[a-z0-9-]{2,40}$/), displayName: z.string().min(1).max(40), capabilities: z.array(z.enum(["reasoning", "vision", "tools", "coding", "long-context"])).max(8) })).max(20),
+  release: z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), downloadUrl: z.string().url(), sha256: z.string().regex(/^[a-f0-9]{64}$/), unsigned: z.boolean() }),
+}).strict();
+const conservativePublicConfig = publicConfigSchema.parse({ minimumClientVersion: "0.1.0", latestClientVersion: "0.1.0", capabilities: { telegram: false, feishu: false }, models: [{ id: "auto", displayName: "Auto", capabilities: ["reasoning", "tools", "long-context"] }], release: { version: "0.1.0", downloadUrl: "https://download.alipayclaw.cn/releases/0.1.0/niuma-office-0.1.0-mac-arm64-internal.zip", sha256: "2d19dd7e539fe386758ab33bd0c45523890a2860f4ca977732369eddb93427ea", unsigned: true } });
 
-export function createApp(config: ApiConfig, repository: ChannelStore, telegram?: TelegramTransport, modelGateway?: ModelGatewayOptions) {
+export function createApp(config: ApiConfig, repository: ChannelStore, telegram?: TelegramTransport, modelGateway?: ModelGatewayOptions, admin?: AdminOptions) {
   const telegramClient = telegram ?? (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_BOT_USERNAME ? new TelegramClient(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_BOT_USERNAME) : undefined);
   const app = Fastify({ logger: config.NODE_ENV !== "test", bodyLimit: 512 * 1024, trustProxy: true });
   const replay = new ReplayWindow();
@@ -71,6 +80,28 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
       feishu: false,
     },
   }));
+  app.get("/v1/config", async (request, reply) => {
+    const stored = repository.currentPublicConfig ? await repository.currentPublicConfig() : undefined;
+    const value = stored ?? { version: 0, config: conservativePublicConfig, etag: hashConfig(conservativePublicConfig), createdAt: null };
+    const etag = `"${value.etag}"`;
+    reply.header("cache-control", "public, max-age=60, stale-if-error=300").header("etag", etag);
+    if (etagMatches(request.headers["if-none-match"], etag)) return reply.code(304).send();
+    return { version: value.version, updatedAt: value.createdAt, ...publicConfigSchema.parse(value.config) };
+  });
+  app.put("/v1/admin/config", safe(async (request: any, reply: any) => {
+    requireAdmin(request.headers.authorization, admin?.token);
+    if (!repository.writePublicConfig) throw httpError(503, "配置存储暂时不可用");
+    const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(request.headers["idempotency-key"]);
+    const actor = z.string().min(1).max(120).parse(request.headers["x-niuma-admin-actor"]);
+    const value = publicConfigSchema.parse(request.body); const etag = hashConfig(value);
+    const result = await repository.writePublicConfig(value, etag, actor, idempotencyKey);
+    reply.code(result.repeated ? 200 : 201); return result;
+  }) as never);
+  app.get("/v1/admin/config/history", safe(async (request: any) => {
+    requireAdmin(request.headers.authorization, admin?.token);
+    if (!repository.publicConfigHistory) throw httpError(503, "配置存储暂时不可用");
+    return { versions: await repository.publicConfigHistory(50) };
+  }) as never);
   app.post("/v1/devices/register", safe(async (request: any) => {
     const input = deviceSchema.parse(request.body);
     authenticateRegistration(request, input);
@@ -150,6 +181,9 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
 
 function publicPairing(session: PairingSession) { const { tokenHash: _tokenHash, ...safe } = session; return safe; }
 function hashToken(token: string) { return createHash("sha256").update(token).digest("hex"); }
-function bearerToken(value: unknown) { const match = /^Bearer ([A-Za-z0-9_-]{40,128})$/.exec(String(value ?? "")); return match?.[1]; }
+function bearerToken(value: unknown) { const match = /^Bearer ([A-Za-z0-9_-]{32,128})$/.exec(String(value ?? "")); return match?.[1]; }
 function httpError(statusCode: number, message: string) { return Object.assign(new Error(message), { statusCode }); }
 function secretEquals(left: string, right: string) { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); }
+function requireAdmin(value: unknown, token: string | undefined) { if (!token) throw httpError(503, "管理接口尚未启用"); const supplied = bearerToken(value); if (!supplied || !secretEquals(supplied, token)) throw httpError(401, "管理凭证无效"); }
+function hashConfig(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+function etagMatches(value: unknown, expected: string) { return String(value ?? "").split(",").some(tag => tag.trim().replace(/^W\//, "") === expected); }

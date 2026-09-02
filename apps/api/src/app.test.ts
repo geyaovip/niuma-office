@@ -72,4 +72,31 @@ describe("channel API", () => {
     expect((await app.inject({ method: "POST", url: "/v1/webhooks/telegram", payload: {} })).statusCode).toBe(404);
     await app.close();
   });
+
+  it("serves a conservative public config with ETag revalidation", async () => {
+    const app = createApp(config, {} as never);
+    const first = await app.inject({ method: "GET", url: "/v1/config" });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ version: 0, minimumClientVersion: "0.1.0", capabilities: { telegram: false, feishu: false }, models: [{ id: "auto", displayName: "Auto" }] });
+    expect(JSON.stringify(first.json())).not.toContain("ark.cn-beijing");
+    const etag = first.headers.etag; expect(etag).toMatch(/^"[a-f0-9]{64}"$/);
+    const cached = await app.inject({ method: "GET", url: "/v1/config", headers: { "if-none-match": etag! } });
+    expect(cached.statusCode).toBe(304); expect(cached.body).toBe("");
+    const weakCached = await app.inject({ method: "GET", url: "/v1/config", headers: { "if-none-match": `W/${etag}` } });
+    expect(weakCached.statusCode).toBe(304);
+    await app.close();
+  });
+
+  it("protects config writes and forwards an idempotency key to the audited store", async () => {
+    const writePublicConfig = vi.fn(async (_value, _etag, _actor, _key) => ({ version: 2, etag: "b".repeat(64), createdAt: new Date().toISOString(), repeated: false }));
+    const repository = { writePublicConfig, publicConfigHistory: vi.fn(async () => []) };
+    const app = createApp(config, repository as never, undefined, undefined, { token: "a".repeat(48) });
+    const payload = { minimumClientVersion: "0.1.0", latestClientVersion: "0.1.0", capabilities: { telegram: false, feishu: false }, models: [{ id: "auto", displayName: "Auto", capabilities: ["reasoning", "tools"] }], release: { version: "0.1.0", downloadUrl: "https://download.alipayclaw.cn/releases/0.1.0/app.zip", sha256: "c".repeat(64), unsigned: true } };
+    expect((await app.inject({ method: "PUT", url: "/v1/admin/config", payload })).statusCode).toBe(401);
+    const response = await app.inject({ method: "PUT", url: "/v1/admin/config", headers: { authorization: `Bearer ${"a".repeat(48)}`, "idempotency-key": "release-config-0.1.0", "x-niuma-admin-actor": "release-pipeline" }, payload });
+    expect(response.statusCode).toBe(201); expect(response.json()).toMatchObject({ version: 2, repeated: false });
+    expect(writePublicConfig).toHaveBeenCalledWith(payload, expect.stringMatching(/^[a-f0-9]{64}$/), "release-pipeline", "release-config-0.1.0");
+    expect((await app.inject({ method: "GET", url: "/v1/admin/config/history" })).statusCode).toBe(401);
+    await app.close();
+  });
 });

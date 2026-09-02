@@ -33,4 +33,16 @@ CREATE TABLE IF NOT EXISTS model_gateway_sessions (
   request_count integer NOT NULL DEFAULT 0, max_requests integer NOT NULL DEFAULT 1000
 );
 CREATE INDEX IF NOT EXISTS idx_model_gateway_device ON model_gateway_sessions(device_installation_id, expires_at DESC);
+CREATE TABLE IF NOT EXISTS public_config_versions (
+  version bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, config jsonb NOT NULL, etag text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(), created_by text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_idempotency_keys (
+  key text PRIMARY KEY, operation text NOT NULL, response jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS admin_audit_events (
+  id uuid PRIMARY KEY, actor text NOT NULL, action text NOT NULL, resource text NOT NULL, idempotency_key text,
+  before_version bigint, after_version bigint, summary jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_events(created_at DESC);
 `;

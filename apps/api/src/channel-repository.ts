@@ -96,6 +96,31 @@ export class ChannelRepository {
     if (error) await this.pool.query("UPDATE channel_outbound_messages SET status=CASE WHEN attempt+1>=8 THEN 'failed' ELSE 'queued' END,attempt=attempt+1,error=$2,next_attempt_at=now()+make_interval(secs => LEAST(1800,30*CAST(power(2,LEAST(attempt,6)) AS integer))) WHERE id=$1", [id, error.slice(0, 300)]);
     else await this.pool.query("UPDATE channel_outbound_messages SET status='sent',sent_at=now(),error=NULL WHERE id=$1", [id]);
   }
+
+  async currentPublicConfig() {
+    const row = (await this.pool.query("SELECT version,config,etag,created_at FROM public_config_versions ORDER BY version DESC LIMIT 1")).rows[0];
+    return row ? { version: Number(row.version), config: row.config, etag: String(row.etag), createdAt: toIso(row.created_at) } : undefined;
+  }
+
+  async writePublicConfig(config: unknown, etag: string, actor: string, idempotencyKey: string, now = new Date()) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const repeated = (await client.query("SELECT response FROM admin_idempotency_keys WHERE key=$1 AND operation='public-config.write' FOR UPDATE", [idempotencyKey])).rows[0];
+      if (repeated) { await client.query("COMMIT"); return { ...(repeated.response as { version: number; etag: string; createdAt: string }), repeated: true }; }
+      const before = (await client.query("SELECT version,config,etag FROM public_config_versions ORDER BY version DESC LIMIT 1 FOR UPDATE")).rows[0];
+      const created = (await client.query("INSERT INTO public_config_versions(config,etag,created_at,created_by) VALUES($1,$2,$3,$4) RETURNING version,etag,created_at", [config, etag, now.toISOString(), actor])).rows[0];
+      const response = { version: Number(created.version), etag: String(created.etag), createdAt: toIso(created.created_at), repeated: false };
+      await client.query("INSERT INTO admin_idempotency_keys(key,operation,response,created_at) VALUES($1,'public-config.write',$2,$3)", [idempotencyKey, response, now.toISOString()]);
+      await client.query("INSERT INTO admin_audit_events(id,actor,action,resource,idempotency_key,before_version,after_version,summary,created_at) VALUES($1,$2,'update','public-config',$3,$4,$5,$6,$7)", [randomUUID(), actor, idempotencyKey, before ? Number(before.version) : null, response.version, { beforeEtag: before?.etag ?? null, afterEtag: etag }, now.toISOString()]);
+      await client.query("COMMIT"); return response;
+    } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+  }
+
+  async publicConfigHistory(limit = 20) {
+    const rows = (await this.pool.query("SELECT version,etag,created_at,created_by FROM public_config_versions ORDER BY version DESC LIMIT $1", [limit])).rows;
+    return rows.map(row => ({ version: Number(row.version), etag: String(row.etag), createdAt: toIso(row.created_at), createdBy: String(row.created_by) }));
+  }
 }
 
 function outboundText(state: "accepted" | "running" | "waiting_user" | "completed" | "failed", summary?: string) { const base = { accepted: "已收到，任务已交给你的 Mac。", running: "任务正在执行。", waiting_user: "任务需要你在 Mac 上确认后继续。", completed: "任务已完成。", failed: "任务未能完成，请在 Mac 上查看原因。" }[state]; return summary?.trim() ? `${base}\n\n${summary.trim().slice(0, 3000)}` : base; }
