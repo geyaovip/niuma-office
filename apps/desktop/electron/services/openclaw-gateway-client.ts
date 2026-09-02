@@ -97,6 +97,8 @@ export class OpenClawGatewayRunner {
     const gateway = await this.loadModule();
     const proposedRunId = randomUUID();
     let acceptedRunId: string = proposedRunId;
+    const observedRunIds = new Set<string>([proposedRunId]);
+    let dispatchSettled = false;
     let output = "";
     let terminal = false;
     let eventWork = Promise.resolve();
@@ -110,12 +112,31 @@ export class OpenClawGatewayRunner {
     const finish = (value: string) => {
       if (terminal) return;
       terminal = true;
-      void eventWork.finally(() => resolveRun(value.trim()));
+      void eventWork.finally(() => {
+        resolveRun(value.trim());
+      });
     };
     const fail = (error: Error) => {
       if (terminal) return;
       terminal = true;
       void eventWork.finally(() => rejectRun(error));
+    };
+    const matchesCurrentRun = (payload: Record<string, unknown> | undefined) => {
+      if (!payload) return false;
+      const eventRunId = asString(payload.runId);
+      const eventSessionKey = asString(payload.sessionKey);
+      if (!eventRunId || (eventSessionKey && !isCurrentSession(eventSessionKey, options.sessionKey))) return false;
+      if (observedRunIds.has(eventRunId)) return true;
+      // OpenClaw 2.0 may emit the accepted server run id before chat.send's
+      // request promise resolves. A task owns a dedicated session, so the first
+      // event from that exact session is the authoritative accepted run.
+      if (!dispatchSettled && isCurrentSession(eventSessionKey, options.sessionKey)) {
+        observedRunIds.add(eventRunId);
+        acceptedRunId = eventRunId;
+        this.active.set(options.taskId, { client, sessionKey: options.sessionKey, runId: eventRunId });
+        return true;
+      }
+      return false;
     };
 
     const client = new gateway.GatewayClient({
@@ -135,7 +156,7 @@ export class OpenClawGatewayRunner {
       onEvent: (event: GatewayEvent) => {
         if (event.event === "progressCard.changed") {
           const payload = asRecord(event.payload);
-          if (asString(payload?.sessionKey) !== options.sessionKey) return;
+          if (!isCurrentSession(asString(payload?.sessionKey), options.sessionKey)) return;
           eventWork = eventWork.then(async () => {
             const result = asRecord(await client.request("progressCard.get", { sessionKey: options.sessionKey }));
             const card = asRecord(result?.card);
@@ -146,7 +167,7 @@ export class OpenClawGatewayRunner {
         }
         if (event.event === "question.requested") {
           const question = parseQuestionEvent(event.payload);
-          if (!question || (asString(asRecord(event.payload)?.sessionKey) && asString(asRecord(event.payload)?.sessionKey) !== options.sessionKey)) return;
+          if (!question || (asString(asRecord(event.payload)?.sessionKey) && !isCurrentSession(asString(asRecord(event.payload)?.sessionKey), options.sessionKey))) return;
           const pending = this.pendingQuestions.get(options.taskId) ?? new Map<string, GatewayQuestionEvent>();
           pending.set(question.id, question);
           this.pendingQuestions.set(options.taskId, pending);
@@ -169,7 +190,7 @@ export class OpenClawGatewayRunner {
           const request = asRecord(envelope?.request) ?? envelope;
           const id = asString(envelope?.id) || asString(request?.id);
           const requestSessionKey = asString(request?.sessionKey) || asString(asRecord(request?.systemRunPlan)?.sessionKey);
-          if (!id || (requestSessionKey && requestSessionKey !== options.sessionKey)) return;
+          if (!id || (requestSessionKey && !isCurrentSession(requestSessionKey, options.sessionKey))) return;
           const pending = this.pendingApprovals.get(options.taskId) ?? new Set<string>();
           pending.add(id);
           this.pendingApprovals.set(options.taskId, pending);
@@ -199,7 +220,7 @@ export class OpenClawGatewayRunner {
           const request = asRecord(envelope?.request) ?? envelope;
           const id = asString(envelope?.id) || asString(request?.id);
           const requestSessionKey = asString(request?.sessionKey);
-          if (!id || (requestSessionKey && requestSessionKey !== options.sessionKey)) return;
+          if (!id || (requestSessionKey && !isCurrentSession(requestSessionKey, options.sessionKey))) return;
           const pending = this.pendingApprovals.get(options.taskId) ?? new Set<string>();
           pending.add(id);
           this.pendingApprovals.set(options.taskId, pending);
@@ -220,7 +241,7 @@ export class OpenClawGatewayRunner {
         }
         if (event.event === "chat") {
           const payload = asRecord(event.payload);
-          if (!payload || payload.runId !== acceptedRunId || payload.sessionKey !== options.sessionKey) return;
+          if (!payload || !matchesCurrentRun(payload) || !isCurrentSession(asString(payload.sessionKey), options.sessionKey)) return;
           const state = asString(payload.state);
           if (state === "delta") {
             const delta = asString(payload.deltaText);
@@ -236,7 +257,7 @@ export class OpenClawGatewayRunner {
         }
         if (event.event !== "agent") return;
         const payload = asRecord(event.payload);
-        if (!payload || payload.runId !== acceptedRunId || payload.stream !== "tool") return;
+        if (!matchesCurrentRun(payload) || payload?.stream !== "tool") return;
         const data = asRecord(payload.data);
         const phase = asString(data?.phase);
         const toolCallId = asString(data?.toolCallId);
@@ -266,17 +287,27 @@ export class OpenClawGatewayRunner {
       if (!readiness.ready) throw new Error("Gateway connection timeout");
       await Promise.race([ready, timeout(12_000).then(() => { throw new Error("Gateway authentication timeout"); })]);
       if (options.signal.aborted) throw new Error("TASK_CANCELLED");
-      const response = asRecord(await client.request("chat.send", {
+      // OpenClaw 2.0 keeps chat.send pending while it streams events. Do not
+      // block terminal event handling on that request promise: the authoritative
+      // completion signal is the session-scoped chat final event.
+      void client.request("chat.send", {
         sessionKey: options.sessionKey,
         agentId: "main",
         message: options.message,
         deliver: false,
         timeoutMs: 900_000,
         idempotencyKey: proposedRunId,
-      }));
-      acceptedRunId = asString(response?.runId) || proposedRunId;
-      this.active.set(options.taskId, { client, sessionKey: options.sessionKey, runId: acceptedRunId });
-      if (response?.status === "ok" && output) finish(output);
+      }).then(value => {
+        const response = asRecord(value);
+        const responseRunId = asString(response?.runId);
+        if (responseRunId) {
+          observedRunIds.add(responseRunId);
+          acceptedRunId = responseRunId;
+        }
+        dispatchSettled = true;
+        this.active.set(options.taskId, { client, sessionKey: options.sessionKey, runId: acceptedRunId });
+        if (response?.status === "ok" && output) finish(output);
+      }).catch(error => fail(error instanceof Error ? error : new Error("Gateway task failed")));
       return await Promise.race([result, timeout(910_000).then(() => { throw new Error("Gateway task timeout"); })]);
     } finally {
       options.signal.removeEventListener("abort", abort);
@@ -377,6 +408,10 @@ export class OpenClawGatewayRunner {
     this.pendingQuestions.delete(taskId);
     this.taskWideGrants.delete(taskId);
   }
+}
+
+function isCurrentSession(eventSessionKey: string, requestedSessionKey: string) {
+  return eventSessionKey === requestedSessionKey || eventSessionKey === `agent:main:${requestedSessionKey}`;
 }
 
 async function importGatewayModule() {

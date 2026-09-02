@@ -3,7 +3,7 @@ import { OpenClawGatewayRunner, isTaskGrantSafe } from "./openclaw-gateway-clien
 
 type ClientOptions = Record<string, unknown> & { onHelloOk: () => void; onEvent: (event: unknown) => void; onClose: (code: number, reason: string) => void };
 
-function fakeGateway(mode: "complete" | "pending" | "approval" | "approval-timeout" | "plugin" | "question" = "complete") {
+function fakeGateway(mode: "complete" | "server-run" | "streaming-pending" | "pending" | "approval" | "approval-timeout" | "plugin" | "question" = "complete") {
   const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
   let options!: ClientOptions;
   class GatewayClient {
@@ -16,18 +16,19 @@ function fakeGateway(mode: "complete" | "pending" | "approval" | "approval-timeo
       if (method === "chat.send") {
         if (mode === "approval" || mode === "approval-timeout") queueMicrotask(() => options.onEvent({ event: "exec.approval.requested", payload: { id: "approval-1", request: { command: "mkdir 报告", cwd: "/workspace", sessionKey: params?.sessionKey }, expiresAtMs: Date.now() + (mode === "approval-timeout" ? 10 : 60_000) } }));
         if (mode === "plugin") queueMicrotask(() => options.onEvent({ event: "plugin.approval.requested", payload: { id: "plugin-1", request: { title: "读取日历", description: "读取已授权的日程", sessionKey: params?.sessionKey }, expiresAtMs: Date.now() + 60_000 } }));
-        if (mode === "complete") queueMicrotask(() => {
-          const runId = params?.idempotencyKey;
-          const sessionKey = params?.sessionKey;
-          options.onEvent({ event: "agent", payload: { runId, stream: "tool", data: { phase: "start", toolCallId: "tool-1", name: "文件读取" } } });
+        if (mode === "complete" || mode === "server-run" || mode === "streaming-pending") queueMicrotask(() => {
+          const runId = mode === "server-run" ? "accepted-server-run" : params?.idempotencyKey;
+          const sessionKey = mode === "server-run" ? `agent:main:${String(params?.sessionKey)}` : params?.sessionKey;
+          options.onEvent({ event: "agent", payload: { runId, sessionKey, stream: "tool", data: { phase: "start", toolCallId: "tool-1", name: "文件读取" } } });
           options.onEvent({ event: "progressCard.changed", payload: { sessionKey, revision: 2 } });
           options.onEvent({ event: "chat", payload: { runId, sessionKey, state: "delta", deltaText: "正式" } });
           options.onEvent({ event: "chat", payload: { runId, sessionKey, state: "delta", deltaText: "结果" } });
-          options.onEvent({ event: "agent", payload: { runId, stream: "tool", data: { phase: "result", toolCallId: "tool-1", name: "文件读取", isError: false } } });
+          options.onEvent({ event: "agent", payload: { runId, sessionKey, stream: "tool", data: { phase: "result", toolCallId: "tool-1", name: "文件读取", isError: false } } });
           options.onEvent({ event: "chat", payload: { runId, sessionKey, state: "final", message: { role: "assistant", content: [{ type: "text", text: "正式结果" }] } } });
         });
         if (mode === "question") queueMicrotask(() => options.onEvent({ event: "question.requested", payload: { id: "question-1", sessionKey: params?.sessionKey, expiresAtMs: Date.now() + 60_000, questions: [{ questionId: "format", header: "交付格式", question: "请选择交付格式", options: [{ label: "Markdown" }, { label: "Word" }] }] } }));
-        return { runId: params?.idempotencyKey, status: "started" };
+        if (mode === "streaming-pending") return await new Promise(() => undefined);
+        return { runId: mode === "server-run" ? "accepted-server-run" : params?.idempotencyKey, status: "started" };
       }
       if (method === "exec.approval.resolve" && (mode === "approval" || mode === "approval-timeout")) queueMicrotask(() => {
         const send = requests.find(item => item.method === "chat.send");
@@ -77,6 +78,18 @@ describe("OpenClawGatewayRunner", () => {
     const send = gateway.requests.find(item => item.method === "chat.send");
     expect(send?.params?.idempotencyKey).toBeTruthy();
     expect(send?.params).not.toHaveProperty("token");
+  });
+
+  it("接收 chat.send 返回前由 OpenClaw 2.0 分配的运行标识", async () => {
+    const gateway = fakeGateway("server-run");
+    const runner = new OpenClawGatewayRunner(() => ({ url: "ws://127.0.0.1:1234", token: "secret" }), async () => gateway.module);
+    await expect(runner.run({ taskId: "task-server-run", sessionKey: "task-server-run", message: "生成报告", workspacePath: "/workspace", signal: new AbortController().signal })).resolves.toBe("正式结果");
+  });
+
+  it("chat.send 保持流式挂起时仍以 final 事件完成任务", async () => {
+    const gateway = fakeGateway("streaming-pending");
+    const runner = new OpenClawGatewayRunner(() => ({ url: "ws://127.0.0.1:1234", token: "secret" }), async () => gateway.module);
+    await expect(runner.run({ taskId: "task-streaming", sessionKey: "task-streaming", message: "生成报告", workspacePath: "/workspace", signal: new AbortController().signal })).resolves.toBe("正式结果");
   });
 
   it("接收结构化问题并将答案返回当前任务", async () => {

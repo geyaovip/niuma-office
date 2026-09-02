@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, powerMonitor, safeStorage, shell, type MenuItemConstructorOptions } from "electron";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendFileSync } from "node:fs";
@@ -18,10 +18,24 @@ import { DeviceIdentityRepository } from "./services/device-identity-repository.
 import { ChannelClient } from "./services/channel-client.js";
 import { ChannelDeliveryService } from "./services/channel-delivery-service.js";
 import { CredentialRepository } from "./services/credential-repository.js";
+import { resolveCloudServiceUrl } from "./services/cloud-service-config.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.VITE_DEV_SERVER_URL;
 app.setName("牛马办公");
+
+const ownsSingleInstance = app.requestSingleInstanceLock();
+if (!ownsSingleInstance) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+}
 
 function createMainWindow() {
   const window = new BrowserWindow({
@@ -122,7 +136,7 @@ function installApplicationMenu(window: BrowserWindow) {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(() => {
+if (ownsSingleInstance) app.whenReady().then(() => {
   const diagnosticsFile = join(app.getPath("temp"), "niuma-desktop-main.log");
   const recordDiagnostic = (message: string) => appendFileSync(diagnosticsFile, `${new Date().toISOString()} ${message}\n`);
   const appDataPath = app.getPath("appData");
@@ -138,7 +152,11 @@ app.whenReady().then(() => {
   const knowledge = new KnowledgeRepository(workspace.getRoot());
   const runtimeRoot = app.isPackaged ? join(process.resourcesPath, "runtime") : join(app.getAppPath(), "runtime");
   const runtime = new OpenClawSupervisor(workspace.getRoot(), runtimeRoot);
-  const channelClient = new ChannelClient(process.env.NIUMA_API_URL?.trim(), deviceIdentity);
+  const channelClient = new ChannelClient(
+    resolveCloudServiceUrl(app.isPackaged, process.env.NIUMA_API_URL),
+    deviceIdentity,
+    (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init),
+  );
   const taskExecutor = new TaskExecutor(workspace, modelSettings, runtime, undefined, undefined, skills, connectors, knowledge, credentials, channelClient);
   const broadcast = (channel: string, payload: unknown) => BrowserWindow.getAllWindows().forEach(window => window.webContents.send(channel, payload));
   const channelDelivery = new ChannelDeliveryService(channelClient, workspace, taskExecutor, task => broadcast("task:updated", task), event => broadcast("runtime:event", event));
