@@ -4,7 +4,8 @@ import { canonicalDeviceRequest } from "@niuma/channel-adapter";
 import { createApp } from "./app.js";
 import type { ApiConfig } from "./config.js";
 
-const config: ApiConfig = { NODE_ENV: "test", PORT: 8787, HOST: "127.0.0.1", DATABASE_URL: "postgres://unused", TELEGRAM_BOT_TOKEN: "test-token", TELEGRAM_BOT_USERNAME: "NiumaOfficeBot", TELEGRAM_WEBHOOK_SECRET: "webhook-secret", PUBLIC_API_URL: "https://api.example.com", NIUMA_ARK_BASE_URL: "https://ark.cn-beijing.volces.com/api/v3" };
+const config: ApiConfig = { NODE_ENV: "test", PORT: 8787, HOST: "127.0.0.1", DATABASE_URL: "postgres://unused", TELEGRAM_BOT_TOKEN: "test-token", TELEGRAM_BOT_USERNAME: "NiumaOfficeBot", TELEGRAM_WEBHOOK_SECRET: "webhook-secret", PUBLIC_API_URL: "https://api.example.com", NIUMA_MODEL_ROUTE_MODE: "static", NIUMA_ARK_BASE_URL: "https://ark.cn-beijing.volces.com/api/v3" };
+const modelRoutePayload = { logicalModelId: "auto", displayName: "Auto", provider: "volcengine-ark" as const, providerModelId: "ep-private", endpoint: "https://ark.cn-beijing.volces.com/api/v3", capabilities: ["reasoning", "tools"] as const, inputPriceMicrounitsPerMillion: 1_000_000, outputPriceMicrounitsPerMillion: 2_000_000, cachePriceMicrounitsPerMillion: 500_000, contextLimit: 128_000, outputLimit: 16_000, enabled: true, sortOrder: 10, health: "healthy" as const, fallbackPriority: 10, minimumClientVersion: "0.1.0" };
 
 function signedHeaders(method: string, path: string, body: string, deviceInstallationId: string, privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"]) {
   const unsigned = { deviceInstallationId, timestamp: Date.now(), nonce: randomBytes(18).toString("base64url") };
@@ -38,25 +39,26 @@ describe("channel API", () => {
       registerDevice: vi.fn(async () => undefined), publicKey: vi.fn(async () => publicKeyPem),
       createModelSession: vi.fn(async (_deviceId: string, hash: string) => { tokenHash = hash; return { id: randomUUID(), expiresAt: new Date(Date.now() + 60_000).toISOString() }; }),
     };
-    const app = createApp(config, repository as never, undefined, { apiKey: "upstream-secret-never-returned", modelId: "doubao-private-endpoint", baseUrl: config.NIUMA_ARK_BASE_URL });
-    const path = "/v1/model-gateway/sessions"; const response = await app.inject({ method: "POST", url: path, headers: signedHeaders("POST", path, "", deviceInstallationId, keys.privateKey) });
+    const app = createApp(config, repository as never, undefined, { apiKey: "upstream-secret-never-returned", staticModelId: "doubao-private-endpoint", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "static" });
+    const path = "/v1/model-gateway/sessions"; const body = JSON.stringify({ clientVersion: "0.1.0" }); const response = await app.inject({ method: "POST", url: path, headers: { ...signedHeaders("POST", path, body, deviceInstallationId, keys.privateKey), "content-type": "application/json" }, payload: body });
     expect(response.statusCode).toBe(200);
     const payload = response.json();
     expect(payload).toMatchObject({ baseUrl: "https://api.example.com/v1/model-gateway", modelId: "auto" });
     expect(payload.accessToken).toMatch(/^[A-Za-z0-9_-]{40,128}$/);
     expect(JSON.stringify(payload)).not.toContain("upstream-secret");
     expect(tokenHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(repository.createModelSession).toHaveBeenCalledWith(deviceInstallationId, tokenHash, expect.any(Date), "0.1.0");
     await app.close();
   });
 
   it("authenticates the short-lived token, forces the server model and proxies the response", async () => {
-    const consumeModelSession = vi.fn(async () => randomUUID());
+    const consumeModelSession = vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" }));
     const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer upstream-secret-never-returned");
       expect(JSON.parse(String(init?.body))).toMatchObject({ model: "doubao-private-endpoint", messages: [{ role: "user", content: "你好" }] });
       return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "你好" } }] }), { status: 200, headers: { "content-type": "application/json" } });
     });
-    const app = createApp(config, { consumeModelSession } as never, undefined, { apiKey: "upstream-secret-never-returned", modelId: "doubao-private-endpoint", baseUrl: config.NIUMA_ARK_BASE_URL, fetcher: fetcher as typeof fetch });
+    const app = createApp(config, { consumeModelSession } as never, undefined, { apiKey: "upstream-secret-never-returned", staticModelId: "doubao-private-endpoint", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "static", fetcher: fetcher as typeof fetch });
     const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}` }, payload: { model: "attempted-client-model", messages: [{ role: "user", content: "你好" }] } });
     expect(response.statusCode).toBe(200);
     expect(response.json().choices[0].message.content).toBe("你好");
@@ -98,5 +100,52 @@ describe("channel API", () => {
     expect(writePublicConfig).toHaveBeenCalledWith(payload, expect.stringMatching(/^[a-f0-9]{64}$/), "release-pipeline", "release-config-0.1.0");
     expect((await app.inject({ method: "GET", url: "/v1/admin/config/history" })).statusCode).toBe(401);
     await app.close();
+  });
+
+  it("protects model administration and validates the full route contract", async () => {
+    const route = { id: randomUUID(), ...modelRoutePayload, capabilities: [...modelRoutePayload.capabilities], version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const createModelRoute = vi.fn(async () => ({ route, repeated: false })); const updateModelRoute = vi.fn(async () => ({ route: { ...route, version: 2 }, repeated: false }));
+    const repository = { createModelRoute, updateModelRoute, listModelRoutes: vi.fn(async () => [route]) }; const app = createApp(config, repository as never, undefined, undefined, { token: "a".repeat(48) });
+    expect((await app.inject({ method: "GET", url: "/v1/admin/models" })).statusCode).toBe(401);
+    const headers = { authorization: `Bearer ${"a".repeat(48)}`, "idempotency-key": "model-create-auto-001", "x-niuma-admin-actor": "model-operator" };
+    expect((await app.inject({ method: "POST", url: "/v1/admin/models", headers, payload: { ...modelRoutePayload, outputLimit: 200_000 } })).statusCode).toBe(400);
+    const created = await app.inject({ method: "POST", url: "/v1/admin/models", headers, payload: modelRoutePayload }); expect(created.statusCode).toBe(201);
+    expect(createModelRoute).toHaveBeenCalledWith(expect.objectContaining({ logicalModelId: "auto", providerModelId: "ep-private" }), "model-operator", "model-create-auto-001");
+    const updated = await app.inject({ method: "PUT", url: `/v1/admin/models/${route.id}`, headers: { ...headers, "idempotency-key": "model-update-auto-001" }, payload: { ...modelRoutePayload, enabled: false, health: "disabled" } }); expect(updated.statusCode).toBe(201);
+    expect(updateModelRoute).toHaveBeenCalledWith(route.id, expect.objectContaining({ enabled: false }), "model-operator", "model-update-auto-001"); await app.close();
+  });
+
+  it("projects only logical model fields and resolves Auto through the catalog", async () => {
+    const consumeModelSession = vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" }));
+    const resolveModelRoute = vi.fn(async () => ({ providerModelId: "ep-selected-private", endpoint: "https://ark.cn-beijing.volces.com/api/v3" }));
+    const publicModelCatalog = vi.fn(async () => [{ id: "auto", displayName: "Auto", capabilities: ["reasoning", "tools"] }]);
+    const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => { expect(JSON.parse(String(init?.body)).model).toBe("ep-selected-private"); return new Response(JSON.stringify({ choices: [] }), { status: 200, headers: { "content-type": "application/json" } }); });
+    const repository = { consumeModelSession, resolveModelRoute, publicModelCatalog };
+    const gateway = { apiKey: "server-only-key", staticModelId: "emergency-only", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database" as const, fetcher: fetcher as typeof fetch };
+    const app = createApp(config, repository as never, undefined, gateway);
+    const publicResponse = await app.inject({ method: "GET", url: "/v1/config" }); expect(publicResponse.statusCode).toBe(200); expect(publicResponse.json().models).toEqual([{ id: "auto", displayName: "Auto", capabilities: ["reasoning", "tools"] }]);
+    expect(JSON.stringify(publicResponse.json())).not.toMatch(/ep-selected|ark\.example|server-only/);
+    const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}` }, payload: { model: "client-attempt", messages: [{ role: "user", content: "你好" }] } });
+    expect(response.statusCode).toBe(200); expect(resolveModelRoute).toHaveBeenCalledWith("auto", "0.1.0"); expect(fetcher).toHaveBeenCalledOnce(); await app.close();
+  });
+
+  it("invalidates the public config ETag when the database model catalog changes", async () => {
+    let capabilities = ["reasoning"];
+    const repository = { publicModelCatalog: vi.fn(async () => [{ id: "auto", displayName: "Auto", capabilities }]) };
+    const app = createApp(config, repository as never, undefined, { apiKey: "server-only-key", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database" });
+    const first = await app.inject({ method: "GET", url: "/v1/config" });
+    capabilities = ["reasoning", "tools"];
+    const second = await app.inject({ method: "GET", url: "/v1/config", headers: { "if-none-match": first.headers.etag! } });
+    expect(second.statusCode).toBe(200);
+    expect(second.headers.etag).not.toBe(first.headers.etag);
+    expect(second.json().models[0].capabilities).toEqual(["reasoning", "tools"]);
+    await app.close();
+  });
+
+  it("fails safely when database routing has no eligible model", async () => {
+    const fetcher = vi.fn(); const repository = { consumeModelSession: vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" })), resolveModelRoute: vi.fn(async () => undefined) };
+    const app = createApp(config, repository as never, undefined, { apiKey: "server-only-key", staticModelId: "emergency-only", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database", fetcher: fetcher as typeof fetch });
+    const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}` }, payload: { messages: [{ role: "user", content: "你好" }] } });
+    expect(response.statusCode).toBe(503); expect(response.json().error.message).toContain("没有可用"); expect(fetcher).not.toHaveBeenCalled(); await app.close();
   });
 });

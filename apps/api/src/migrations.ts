@@ -33,6 +33,19 @@ CREATE TABLE IF NOT EXISTS model_gateway_sessions (
   request_count integer NOT NULL DEFAULT 0, max_requests integer NOT NULL DEFAULT 1000
 );
 CREATE INDEX IF NOT EXISTS idx_model_gateway_device ON model_gateway_sessions(device_installation_id, expires_at DESC);
+ALTER TABLE model_gateway_sessions ADD COLUMN IF NOT EXISTS client_version text NOT NULL DEFAULT '0.1.0';
+CREATE TABLE IF NOT EXISTS model_routes (
+  id uuid PRIMARY KEY, logical_model_id text NOT NULL, display_name text NOT NULL,
+  provider text NOT NULL CHECK (provider IN ('volcengine-ark')), provider_model_id text NOT NULL, endpoint text NOT NULL,
+  capabilities jsonb NOT NULL, input_price_microunits_per_million bigint NOT NULL CHECK (input_price_microunits_per_million >= 0),
+  output_price_microunits_per_million bigint NOT NULL CHECK (output_price_microunits_per_million >= 0),
+  cache_price_microunits_per_million bigint NOT NULL CHECK (cache_price_microunits_per_million >= 0),
+  context_limit integer NOT NULL CHECK (context_limit >= 1024), output_limit integer NOT NULL CHECK (output_limit >= 256 AND output_limit <= context_limit),
+  enabled boolean NOT NULL DEFAULT false, sort_order integer NOT NULL DEFAULT 100, health text NOT NULL CHECK (health IN ('healthy','degraded','disabled')),
+  fallback_priority integer NOT NULL DEFAULT 100, minimum_client_version text NOT NULL, version bigint NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(logical_model_id,provider_model_id)
+);
+CREATE INDEX IF NOT EXISTS idx_model_route_resolution ON model_routes(logical_model_id,enabled,health,sort_order,fallback_priority);
 CREATE TABLE IF NOT EXISTS public_config_versions (
   version bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, config jsonb NOT NULL, etag text NOT NULL UNIQUE,
   created_at timestamptz NOT NULL DEFAULT now(), created_by text NOT NULL

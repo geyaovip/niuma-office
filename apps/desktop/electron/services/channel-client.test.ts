@@ -40,6 +40,7 @@ describe("ChannelClient", () => {
       const publicIdentity = identity.getPublicIdentity();
       verifyDeviceRequest("POST", path, body, { deviceInstallationId: headers["x-niuma-device-id"]!, timestamp: Number(headers["x-niuma-timestamp"]), nonce: headers["x-niuma-nonce"]!, signature: headers["x-niuma-signature"]! }, publicIdentity.publicKeyPem, replay);
       if (path === "/v1/devices/register") return new Response(JSON.stringify({ registered: true }), { status: 200, headers: { "content-type": "application/json" } });
+      expect(JSON.parse(body)).toEqual({ clientVersion: "0.1.0" });
       return new Response(JSON.stringify({ accessToken: "t".repeat(48), expiresAt: new Date(Date.now() + 60_000).toISOString(), baseUrl: "https://api.example.com/v1/model-gateway", modelId: "auto" }), { status: 200, headers: { "content-type": "application/json" } });
     });
     const session = await new ChannelClient("https://api.example.com", identity, fetcher as typeof fetch).createModelSession();

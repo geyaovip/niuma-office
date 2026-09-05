@@ -7,15 +7,17 @@ import { ReplayWindow, verifyDeviceRequest } from "@niuma/channel-adapter";
 import type { ApiConfig } from "./config.js";
 import type { ChannelRepository } from "./channel-repository.js";
 import { createTelegramEnvelope, parseTelegramUpdate, TelegramClient, type TelegramUpdate } from "./telegram.js";
+import { modelRouteInputSchema, semverSchema } from "./model-catalog.js";
 
-type ChannelStore = Pick<ChannelRepository, "registerDevice" | "publicKey" | "createPairing" | "pairing" | "cancelPairing" | "consumeTelegram" | "bindingForTelegram" | "listBindings" | "revokeBinding" | "enqueue" | "pull" | "acknowledge" | "markOutbound" | "createModelSession" | "consumeModelSession"> & Partial<Pick<ChannelRepository, "pendingOutbound" | "currentPublicConfig" | "writePublicConfig" | "publicConfigHistory">>;
+type ChannelStore = Pick<ChannelRepository, "registerDevice" | "publicKey" | "createPairing" | "pairing" | "cancelPairing" | "consumeTelegram" | "bindingForTelegram" | "listBindings" | "revokeBinding" | "enqueue" | "pull" | "acknowledge" | "markOutbound" | "createModelSession" | "consumeModelSession"> & Partial<Pick<ChannelRepository, "pendingOutbound" | "currentPublicConfig" | "writePublicConfig" | "publicConfigHistory" | "listModelRoutes" | "createModelRoute" | "updateModelRoute" | "resolveModelRoute" | "publicModelCatalog">>;
 type TelegramTransport = Pick<TelegramClient, "deepLink" | "sendMessage">;
-export interface ModelGatewayOptions { apiKey: string; modelId: string; baseUrl: string; fetcher?: typeof fetch }
+export interface ModelGatewayOptions { apiKey: string; staticModelId?: string; staticBaseUrl: string; routeMode?: "database" | "static"; fetcher?: typeof fetch }
 export interface AdminOptions { token: string }
 
 const deviceSchema = z.object({ deviceInstallationId: z.string().uuid(), publicKeyPem: z.string().min(80).max(10_000), createdAt: z.string().datetime() });
 const ackSchema = z.object({ taskId: z.string().min(1).max(200), state: z.enum(["accepted", "running", "waiting_user", "completed", "failed"]), summary: z.string().max(3000).optional() });
 const modelRequestSchema = z.object({ model: z.string().optional(), messages: z.array(z.unknown()).min(1).max(500) }).loose();
+const modelSessionSchema = z.object({ clientVersion: semverSchema }).strict();
 const publicConfigSchema = z.object({
   minimumClientVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   latestClientVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
@@ -83,10 +85,13 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
   app.get("/v1/config", async (request, reply) => {
     const stored = repository.currentPublicConfig ? await repository.currentPublicConfig() : undefined;
     const value = stored ?? { version: 0, config: conservativePublicConfig, etag: hashConfig(conservativePublicConfig), createdAt: null };
-    const etag = `"${value.etag}"`;
+    const parsed = publicConfigSchema.parse(value.config);
+    const models = modelGateway?.routeMode === "database" && repository.publicModelCatalog ? await repository.publicModelCatalog(parsed.latestClientVersion) : parsed.models;
+    const response = { version: value.version, updatedAt: value.createdAt, ...parsed, models };
+    const etag = `"${hashConfig(response)}"`;
     reply.header("cache-control", "public, max-age=60, stale-if-error=300").header("etag", etag);
     if (etagMatches(request.headers["if-none-match"], etag)) return reply.code(304).send();
-    return { version: value.version, updatedAt: value.createdAt, ...publicConfigSchema.parse(value.config) };
+    return response;
   });
   app.put("/v1/admin/config", safe(async (request: any, reply: any) => {
     requireAdmin(request.headers.authorization, admin?.token);
@@ -102,6 +107,20 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
     if (!repository.publicConfigHistory) throw httpError(503, "配置存储暂时不可用");
     return { versions: await repository.publicConfigHistory(50) };
   }) as never);
+  app.get("/v1/admin/models", safe(async (request: any) => {
+    requireAdmin(request.headers.authorization, admin?.token); if (!repository.listModelRoutes) throw httpError(503, "模型目录存储暂时不可用");
+    return { models: await repository.listModelRoutes() };
+  }) as never);
+  app.post("/v1/admin/models", safe(async (request: any, reply: any) => {
+    requireAdmin(request.headers.authorization, admin?.token); if (!repository.createModelRoute) throw httpError(503, "模型目录存储暂时不可用");
+    const meta = adminWriteMeta(request.headers); const result = await repository.createModelRoute(modelRouteInputSchema.parse(request.body), meta.actor, meta.idempotencyKey);
+    reply.code(result.repeated ? 200 : 201); return result;
+  }) as never);
+  app.put("/v1/admin/models/:id", safe(async (request: any, reply: any) => {
+    requireAdmin(request.headers.authorization, admin?.token); if (!repository.updateModelRoute) throw httpError(503, "模型目录存储暂时不可用");
+    const meta = adminWriteMeta(request.headers); const result = await repository.updateModelRoute(z.string().uuid().parse(request.params.id), modelRouteInputSchema.parse(request.body), meta.actor, meta.idempotencyKey);
+    reply.code(result.repeated ? 200 : 201); return result;
+  }) as never);
   app.post("/v1/devices/register", safe(async (request: any) => {
     const input = deviceSchema.parse(request.body);
     authenticateRegistration(request, input);
@@ -111,26 +130,31 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
 
   app.post("/v1/model-gateway/sessions", safe(async (request: any) => {
     if (!modelGateway) throw httpError(503, "平台模型服务尚未启用");
-    const deviceId = await authenticate(request);
+    const input = modelSessionSchema.parse(request.body); const deviceId = await authenticate(request);
     const accessToken = randomBytes(32).toString("base64url");
     const expiresAt = new Date(Date.now() + 2 * 60 * 60_000);
-    await repository.createModelSession(deviceId, hashToken(accessToken), expiresAt);
+    await repository.createModelSession(deviceId, hashToken(accessToken), expiresAt, input.clientVersion);
     return { accessToken, expiresAt: expiresAt.toISOString(), baseUrl: `${config.PUBLIC_API_URL.replace(/\/$/, "")}/v1/model-gateway`, modelId: "auto" };
   }) as never);
 
   app.post("/v1/model-gateway/chat/completions", async (request: any, reply) => {
     if (!modelGateway) return reply.code(503).send({ error: { message: "平台模型服务尚未启用" } });
     const token = bearerToken(request.headers.authorization);
-    if (!token || !await repository.consumeModelSession(hashToken(token))) return reply.code(401).send({ error: { message: "模型会话已失效，请重新运行任务" } });
+    const session = token ? await repository.consumeModelSession(hashToken(token)) : undefined;
+    if (!session) return reply.code(401).send({ error: { message: "模型会话已失效，请重新运行任务" } });
     const input = modelRequestSchema.safeParse(request.body);
     if (!input.success) return reply.code(400).send({ error: { message: "模型请求格式无效" } });
     const fetcher = modelGateway.fetcher ?? fetch;
+    const route = modelGateway.routeMode === "database"
+      ? await repository.resolveModelRoute?.("auto", session.clientVersion)
+      : modelGateway.staticModelId ? { providerModelId: modelGateway.staticModelId, endpoint: modelGateway.staticBaseUrl } : undefined;
+    if (!route) return reply.code(503).send({ error: { message: "当前没有可用的平台模型，请稍后重试" } });
     let upstream: Response;
     try {
-      upstream = await fetcher(`${modelGateway.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      upstream = await fetcher(`${route.endpoint.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: { accept: "application/json, text/event-stream", authorization: `Bearer ${modelGateway.apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify({ ...input.data, model: modelGateway.modelId }),
+        body: JSON.stringify({ ...input.data, model: route.providerModelId }),
         signal: AbortSignal.timeout(15 * 60_000),
       });
     } catch { return reply.code(502).send({ error: { message: "模型服务暂时无法连接，请稍后重试" } }); }
@@ -187,3 +211,4 @@ function secretEquals(left: string, right: string) { const a = Buffer.from(left)
 function requireAdmin(value: unknown, token: string | undefined) { if (!token) throw httpError(503, "管理接口尚未启用"); const supplied = bearerToken(value); if (!supplied || !secretEquals(supplied, token)) throw httpError(401, "管理凭证无效"); }
 function hashConfig(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function etagMatches(value: unknown, expected: string) { return String(value ?? "").split(",").some(tag => tag.trim().replace(/^W\//, "") === expected); }
+function adminWriteMeta(headers: Record<string, unknown>) { return { idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(headers["idempotency-key"]), actor: z.string().min(1).max(120).parse(headers["x-niuma-admin-actor"]) }; }
