@@ -42,6 +42,7 @@ services:
       PUBLIC_API_URL: https://api.alipayclaw.cn
       DATABASE_URL_FILE: /run/secrets/database_url
       NIUMA_ARK_API_KEY_FILE: /run/secrets/ark_api_key
+      NIUMA_MODEL_ROUTE_MODE: database
       NIUMA_PLATFORM_MODEL_ID: doubao-seed-2-1-turbo-260628
       NIUMA_ARK_BASE_URL: https://ark.cn-beijing.volces.com/api/v3
       NIUMA_ADMIN_TOKEN_FILE: /run/secrets/niuma_admin_token
