@@ -175,7 +175,7 @@ describe("channel API", () => {
     const repository = { consumeModelSession: vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" })), resolveModelRoutes: vi.fn(async () => [route, { ...route, id: randomUUID() }]), startModelUsage: vi.fn(async () => true), completeModelUsage, recordModelRouteFailure };
     const app = createApp(config, repository as never, undefined, { apiKey: "server-only-key", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database", fetcher: fetcher as typeof fetch });
     const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}` }, payload: { messages: [{ role: "user", content: "你好" }] } });
-    expect(response.statusCode).toBe(502); expect(fetcher).toHaveBeenCalledOnce(); expect(recordModelRouteFailure).not.toHaveBeenCalled(); expect(completeModelUsage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", attemptCount: 1, normalizedErrorCode: "upstream_rejected" })); await app.close();
+    expect(response.statusCode).toBe(422); expect(response.json().error).toMatchObject({ code: "upstream_rejected", requestId: expect.any(String) }); expect(fetcher).toHaveBeenCalledOnce(); expect(recordModelRouteFailure).not.toHaveBeenCalled(); expect(completeModelUsage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", attemptCount: 1, normalizedErrorCode: "upstream_rejected" })); await app.close();
   });
 
   it("rejects a duplicate client request id before calling the provider", async () => {

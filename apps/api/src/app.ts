@@ -187,7 +187,7 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
         if (route.id) await safeRouteFailure(repository, route.id);
         if (index + 1 < routes.length) continue;
         await finishUsage({ requestId, status: "failed", route, attemptCount, durationMs: Date.now() - startedAt, normalizedErrorCode: lastErrorCode });
-        return reply.code(502).send({ error: { message: "模型服务暂时无法连接，请稍后重试", requestId } });
+        return reply.code(424).send({ error: { message: "模型服务暂时无法连接，请稍后重试", code: lastErrorCode, requestId } });
       }
       const upstreamRequestId = upstream.headers.get("x-request-id") ?? upstream.headers.get("x-tt-logid") ?? undefined;
       if (!upstream.ok || !upstream.body) {
@@ -197,7 +197,7 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
         try { await upstream.body?.cancel(); } catch { /* response is already being discarded */ }
         if (retryable && index + 1 < routes.length) continue;
         await finishUsage({ requestId, status: "failed", route, attemptCount, durationMs: Date.now() - startedAt, upstreamRequestId, normalizedErrorCode: lastErrorCode });
-        return reply.code(502).send({ error: { message: retryable ? "模型服务暂时不可用，请稍后重试" : "模型请求未被上游接受，请检查内容后重试", requestId } });
+        return reply.code(retryable ? 424 : 422).send({ error: { message: retryable ? "模型服务暂时不可用，请稍后重试" : "模型请求未被接受，请检查内容后重试", code: lastErrorCode, requestId } });
       }
       const contentType = upstream.headers.get("content-type") || "application/json";
       reply.code(upstream.status).header("content-type", contentType);
@@ -214,7 +214,7 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
       return reply.send(observed);
     }
     await finishUsage({ requestId, status: "failed", attemptCount: routes.length, durationMs: Date.now() - startedAt, normalizedErrorCode: lastErrorCode });
-    return reply.code(502).send({ error: { message: "模型服务暂时不可用，请稍后重试", requestId } });
+    return reply.code(424).send({ error: { message: "模型服务暂时不可用，请稍后重试", code: lastErrorCode, requestId } });
   });
 
   app.get("/v1/channels", safe(async (request: any) => { const deviceId = await authenticate(request); return { bindings: await repository.listBindings(deviceId) }; }) as never);
