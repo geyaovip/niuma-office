@@ -148,4 +148,40 @@ describe("channel API", () => {
     const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}` }, payload: { messages: [{ role: "user", content: "你好" }] } });
     expect(response.statusCode).toBe(503); expect(response.json().error.message).toContain("没有可用"); expect(fetcher).not.toHaveBeenCalled(); await app.close();
   });
+
+  it("falls back only after a retryable response and records content-free usage and cost", async () => {
+    const firstRoute = { id: randomUUID(), ...modelRoutePayload, providerModelId: "ep-primary", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const secondRoute = { ...firstRoute, id: randomUUID(), providerModelId: "ep-fallback", fallbackPriority: 20 };
+    const stream = 'data: {"choices":[{"delta":{"content":"完成"}}]}\n\ndata: {"usage":{"prompt_tokens":100,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":20}}}\n\ndata: [DONE]\n\n';
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response("limited", { status: 429 }))
+      .mockResolvedValueOnce(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "x-request-id": "ark-request-safe" } }));
+    const repository = {
+      consumeModelSession: vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" })), resolveModelRoutes: vi.fn(async () => [firstRoute, secondRoute]),
+      startModelUsage: vi.fn(async () => true), completeModelUsage: vi.fn(async () => true), recordModelRouteFailure: vi.fn(async () => ({})), recordModelRouteSuccess: vi.fn(async () => undefined),
+    };
+    const requestId = randomUUID(); const app = createApp(config, repository as never, undefined, { apiKey: "server-only-key", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database", fetcher: fetcher as typeof fetch });
+    const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}`, "x-niuma-request-id": requestId }, payload: { model: "ignored", messages: [{ role: "user", content: "敏感正文不得入账" }], stream: true } });
+    expect(response.statusCode).toBe(200); expect(response.headers["content-type"]).toContain("text/event-stream"); expect(response.body).toBe(stream); expect(response.headers["x-niuma-request-id"]).toBe(requestId); expect(response.headers["x-upstream-request-id"]).toBe("ark-request-safe"); expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toMatchObject({ model: "ep-fallback", stream: true, stream_options: { include_usage: true } });
+    expect(repository.recordModelRouteFailure).toHaveBeenCalledWith(firstRoute.id); expect(repository.recordModelRouteSuccess).toHaveBeenCalledWith(secondRoute.id);
+    expect(repository.completeModelUsage).toHaveBeenCalledWith(expect.objectContaining({ requestId, status: "succeeded", route: secondRoute, usage: { inputTokens: 100, outputTokens: 30, cachedInputTokens: 20 }, estimatedCostMicrounits: 150, attemptCount: 2, upstreamRequestId: "ark-request-safe" }));
+    expect(JSON.stringify(repository.completeModelUsage.mock.calls)).not.toContain("敏感正文不得入账"); await app.close();
+  });
+
+  it("does not retry a permanent upstream rejection", async () => {
+    const route = { id: randomUUID(), ...modelRoutePayload, version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const fetcher = vi.fn(async () => new Response("bad request", { status: 400 })); const completeModelUsage = vi.fn(async () => true); const recordModelRouteFailure = vi.fn(async () => ({}));
+    const repository = { consumeModelSession: vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" })), resolveModelRoutes: vi.fn(async () => [route, { ...route, id: randomUUID() }]), startModelUsage: vi.fn(async () => true), completeModelUsage, recordModelRouteFailure };
+    const app = createApp(config, repository as never, undefined, { apiKey: "server-only-key", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database", fetcher: fetcher as typeof fetch });
+    const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}` }, payload: { messages: [{ role: "user", content: "你好" }] } });
+    expect(response.statusCode).toBe(502); expect(fetcher).toHaveBeenCalledOnce(); expect(recordModelRouteFailure).not.toHaveBeenCalled(); expect(completeModelUsage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", attemptCount: 1, normalizedErrorCode: "upstream_rejected" })); await app.close();
+  });
+
+  it("rejects a duplicate client request id before calling the provider", async () => {
+    const fetcher = vi.fn(); const requestId = randomUUID(); const repository = { consumeModelSession: vi.fn(async () => ({ deviceInstallationId: randomUUID(), clientVersion: "0.1.0" })), startModelUsage: vi.fn(async () => false) };
+    const app = createApp(config, repository as never, undefined, { apiKey: "server-only-key", staticBaseUrl: config.NIUMA_ARK_BASE_URL, routeMode: "database", fetcher: fetcher as typeof fetch });
+    const response = await app.inject({ method: "POST", url: "/v1/model-gateway/chat/completions", headers: { authorization: `Bearer ${"a".repeat(48)}`, "x-niuma-request-id": requestId }, payload: { messages: [{ role: "user", content: "你好" }] } });
+    expect(response.statusCode).toBe(409); expect(response.json().error.requestId).toBe(requestId); expect(fetcher).not.toHaveBeenCalled(); await app.close();
+  });
 });

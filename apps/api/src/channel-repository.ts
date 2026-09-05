@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import { channelBindingSchema, channelEnvelopeSchema, pairingSessionSchema, type ChannelBinding, type ChannelEnvelope, type PairingSession } from "@niuma/contracts";
 import { consumePairingSession, createPairingSession, normalizeExpiry, transitionPairingSession } from "@niuma/channel-adapter";
 import { migrations } from "./migrations.js";
-import { compareSemver, modelRouteInputSchema, type ModelRoute, type ModelRouteInput } from "./model-catalog.js";
+import { compareSemver, modelRouteInputSchema, type ModelRoute, type ModelRouteInput, type ModelUsage } from "./model-catalog.js";
 
 export class ChannelRepository {
   constructor(readonly pool: Pool) {}
@@ -47,6 +47,7 @@ export class ChannelRepository {
       const id = randomUUID(); const values = modelRouteValues(input);
       const row = (await client.query(`INSERT INTO model_routes(id,logical_model_id,display_name,provider,provider_model_id,endpoint,capabilities,input_price_microunits_per_million,output_price_microunits_per_million,cache_price_microunits_per_million,context_limit,output_limit,enabled,sort_order,health,fallback_priority,minimum_client_version,created_at,updated_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18) RETURNING *`, [id, ...values, now.toISOString()])).rows[0];
+      await client.query("INSERT INTO model_route_circuit_states(route_id,updated_at) VALUES($1,$2)", [id, now.toISOString()]);
       const route = toModelRoute(row); const response = { route, repeated: false };
       await client.query("INSERT INTO admin_idempotency_keys(key,operation,response,created_at) VALUES($1,'model-route.create',$2,$3)", [idempotencyKey, response, now.toISOString()]);
       await client.query("INSERT INTO admin_audit_events(id,actor,action,resource,idempotency_key,after_version,summary,created_at) VALUES($1,$2,'create',$3,$4,$5,$6,$7)", [randomUUID(), actor, `model-route:${id}`, idempotencyKey, route.version, { logicalModelId: route.logicalModelId, enabled: route.enabled }, now.toISOString()]);
@@ -71,8 +72,51 @@ export class ChannelRepository {
   }
 
   async resolveModelRoute(logicalModelId: string, clientVersion: string) {
-    const routes = (await this.pool.query("SELECT * FROM model_routes WHERE logical_model_id=$1 AND enabled=true AND health IN ('healthy','degraded') ORDER BY CASE health WHEN 'healthy' THEN 0 ELSE 1 END,sort_order,fallback_priority,created_at", [logicalModelId])).rows.map(toModelRoute);
-    return routes.find(route => compareSemver(clientVersion, route.minimumClientVersion) >= 0);
+    return (await this.resolveModelRoutes(logicalModelId, clientVersion))[0];
+  }
+
+  async resolveModelRoutes(logicalModelId: string, clientVersion: string, now = new Date()) {
+    const routes = (await this.pool.query(`SELECT r.* FROM model_routes r LEFT JOIN model_route_circuit_states c ON c.route_id=r.id
+      WHERE r.logical_model_id=$1 AND r.enabled=true AND r.health IN ('healthy','degraded') AND (c.circuit_open_until IS NULL OR c.circuit_open_until<=$2)
+      ORDER BY CASE r.health WHEN 'healthy' THEN 0 ELSE 1 END,r.sort_order,r.fallback_priority,r.created_at`, [logicalModelId, now.toISOString()])).rows.map(toModelRoute);
+    return routes.filter(route => compareSemver(clientVersion, route.minimumClientVersion) >= 0);
+  }
+
+  async recordModelRouteFailure(routeId: string, now = new Date(), threshold = 3, openDurationMs = 60_000) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const previous = (await client.query<{ consecutive_failures: number; circuit_open_until: Date | null }>("SELECT consecutive_failures,circuit_open_until FROM model_route_circuit_states WHERE route_id=$1 FOR UPDATE", [routeId])).rows[0];
+      const previousOpenUntil = previous?.circuit_open_until ? new Date(previous.circuit_open_until) : undefined;
+      const failures = previousOpenUntil && previousOpenUntil.getTime() <= now.getTime() ? 1 : Number(previous?.consecutive_failures ?? 0) + 1;
+      const openUntil = failures >= threshold ? new Date(now.getTime() + openDurationMs) : undefined;
+      await client.query(`INSERT INTO model_route_circuit_states(route_id,consecutive_failures,circuit_open_until,last_failure_at,updated_at) VALUES($1,$2,$3,$4,$4)
+        ON CONFLICT(route_id) DO UPDATE SET consecutive_failures=EXCLUDED.consecutive_failures,circuit_open_until=EXCLUDED.circuit_open_until,last_failure_at=EXCLUDED.last_failure_at,updated_at=EXCLUDED.updated_at`, [routeId, failures, openUntil?.toISOString() ?? null, now.toISOString()]);
+      await client.query("COMMIT"); return { consecutiveFailures: failures, circuitOpenUntil: openUntil?.toISOString() };
+    } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+  }
+
+  async recordModelRouteSuccess(routeId: string, now = new Date()) {
+    await this.pool.query(`INSERT INTO model_route_circuit_states(route_id,consecutive_failures,circuit_open_until,last_success_at,updated_at) VALUES($1,0,NULL,$2,$2)
+      ON CONFLICT(route_id) DO UPDATE SET consecutive_failures=0,circuit_open_until=NULL,last_success_at=EXCLUDED.last_success_at,updated_at=EXCLUDED.updated_at`, [routeId, now.toISOString()]);
+  }
+
+  async startModelUsage(requestId: string, deviceInstallationId: string, logicalModelId: string, now = new Date()) {
+    const result = await this.pool.query("INSERT INTO model_usage_ledger(request_id,device_installation_id,logical_model_id,status,created_at) VALUES($1,$2,$3,'running',$4) ON CONFLICT(request_id) DO NOTHING", [requestId, deviceInstallationId, logicalModelId, now.toISOString()]);
+    return result.rowCount === 1;
+  }
+
+  async completeModelUsage(input: { requestId: string; status: "succeeded" | "failed" | "cancelled"; route?: Pick<ModelRoute, "providerModelId"> & Partial<ModelRoute>; usage?: ModelUsage; estimatedCostMicrounits?: number; attemptCount: number; durationMs: number; upstreamRequestId?: string; normalizedErrorCode?: string }, now = new Date()) {
+    const route = input.route;
+    const result = await this.pool.query(`UPDATE model_usage_ledger SET status=$2,route_id=$3,provider_model_id=$4,route_version=$5,
+      input_price_microunits_per_million=$6,output_price_microunits_per_million=$7,cache_price_microunits_per_million=$8,
+      input_tokens=$9,output_tokens=$10,cached_input_tokens=$11,estimated_cost_microunits=$12,usage_known=$13,
+      attempt_count=$14,duration_ms=$15,upstream_request_id=$16,normalized_error_code=$17,completed_at=$18
+      WHERE request_id=$1 AND status='running'`, [input.requestId, input.status, route?.id ?? null, route?.providerModelId ?? null, route?.version ?? null,
+      route?.inputPriceMicrounitsPerMillion ?? null, route?.outputPriceMicrounitsPerMillion ?? null, route?.cachePriceMicrounitsPerMillion ?? null,
+      input.usage?.inputTokens ?? null, input.usage?.outputTokens ?? null, input.usage?.cachedInputTokens ?? null, input.estimatedCostMicrounits ?? null, Boolean(input.usage),
+      input.attemptCount, input.durationMs, input.upstreamRequestId?.slice(0, 200) ?? null, input.normalizedErrorCode?.slice(0, 80) ?? null, now.toISOString()]);
+    return result.rowCount === 1;
   }
 
   async publicModelCatalog(clientVersion: string) {

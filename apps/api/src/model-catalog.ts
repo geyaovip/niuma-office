@@ -27,6 +27,19 @@ export const modelRouteInputSchema = z.object({
 export type ModelRouteInput = z.input<typeof modelRouteInputSchema>;
 export type ModelRouteValue = z.output<typeof modelRouteInputSchema>;
 export interface ModelRoute extends ModelRouteValue { id: string; version: number; createdAt: string; updatedAt: string }
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+}
+
+export function estimateCostMicrounits(route: Pick<ModelRouteValue, "inputPriceMicrounitsPerMillion" | "outputPriceMicrounitsPerMillion" | "cachePriceMicrounitsPerMillion">, usage: ModelUsage) {
+  const uncachedInput = Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+  const numerator = BigInt(uncachedInput) * BigInt(route.inputPriceMicrounitsPerMillion)
+    + BigInt(usage.cachedInputTokens) * BigInt(route.cachePriceMicrounitsPerMillion)
+    + BigInt(usage.outputTokens) * BigInt(route.outputPriceMicrounitsPerMillion);
+  return Number((numerator + 999_999n) / 1_000_000n);
+}
 
 export function compareSemver(left: string, right: string) {
   const a = left.split(".").map(Number); const b = right.split(".").map(Number);

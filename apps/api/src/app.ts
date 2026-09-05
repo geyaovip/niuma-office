@@ -1,5 +1,5 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { Readable } from "node:stream";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { Readable, Transform } from "node:stream";
 import Fastify from "fastify";
 import { z } from "zod";
 import { signedDeviceRequestSchema, type PairingSession } from "@niuma/contracts";
@@ -7,12 +7,13 @@ import { ReplayWindow, verifyDeviceRequest } from "@niuma/channel-adapter";
 import type { ApiConfig } from "./config.js";
 import type { ChannelRepository } from "./channel-repository.js";
 import { createTelegramEnvelope, parseTelegramUpdate, TelegramClient, type TelegramUpdate } from "./telegram.js";
-import { modelRouteInputSchema, semverSchema } from "./model-catalog.js";
+import { estimateCostMicrounits, modelRouteInputSchema, semverSchema, type ModelRoute, type ModelUsage } from "./model-catalog.js";
 
-type ChannelStore = Pick<ChannelRepository, "registerDevice" | "publicKey" | "createPairing" | "pairing" | "cancelPairing" | "consumeTelegram" | "bindingForTelegram" | "listBindings" | "revokeBinding" | "enqueue" | "pull" | "acknowledge" | "markOutbound" | "createModelSession" | "consumeModelSession"> & Partial<Pick<ChannelRepository, "pendingOutbound" | "currentPublicConfig" | "writePublicConfig" | "publicConfigHistory" | "listModelRoutes" | "createModelRoute" | "updateModelRoute" | "resolveModelRoute" | "publicModelCatalog">>;
+type ChannelStore = Pick<ChannelRepository, "registerDevice" | "publicKey" | "createPairing" | "pairing" | "cancelPairing" | "consumeTelegram" | "bindingForTelegram" | "listBindings" | "revokeBinding" | "enqueue" | "pull" | "acknowledge" | "markOutbound" | "createModelSession" | "consumeModelSession"> & Partial<Pick<ChannelRepository, "pendingOutbound" | "currentPublicConfig" | "writePublicConfig" | "publicConfigHistory" | "listModelRoutes" | "createModelRoute" | "updateModelRoute" | "resolveModelRoute" | "resolveModelRoutes" | "recordModelRouteFailure" | "recordModelRouteSuccess" | "startModelUsage" | "completeModelUsage" | "publicModelCatalog">>;
 type TelegramTransport = Pick<TelegramClient, "deepLink" | "sendMessage">;
 export interface ModelGatewayOptions { apiKey: string; staticModelId?: string; staticBaseUrl: string; routeMode?: "database" | "static"; fetcher?: typeof fetch }
 export interface AdminOptions { token: string }
+type GatewayRoute = Pick<ModelRoute, "providerModelId" | "endpoint"> & Partial<ModelRoute>;
 
 const deviceSchema = z.object({ deviceInstallationId: z.string().uuid(), publicKeyPem: z.string().min(80).max(10_000), createdAt: z.string().datetime() });
 const ackSchema = z.object({ taskId: z.string().min(1).max(200), state: z.enum(["accepted", "running", "waiting_user", "completed", "failed"]), summary: z.string().max(3000).optional() });
@@ -144,26 +145,76 @@ export function createApp(config: ApiConfig, repository: ChannelStore, telegram?
     if (!session) return reply.code(401).send({ error: { message: "模型会话已失效，请重新运行任务" } });
     const input = modelRequestSchema.safeParse(request.body);
     if (!input.success) return reply.code(400).send({ error: { message: "模型请求格式无效" } });
+    const requestIdResult = z.string().uuid().safeParse(request.headers["x-niuma-request-id"] ?? randomUUID());
+    if (!requestIdResult.success) return reply.code(400).send({ error: { message: "模型请求标识格式无效" } });
+    const requestId = requestIdResult.data; const startedAt = Date.now(); reply.header("x-niuma-request-id", requestId);
+    if (repository.startModelUsage) {
+      try {
+        if (!await repository.startModelUsage(requestId, session.deviceInstallationId, "auto")) return reply.code(409).send({ error: { message: "该模型请求已受理", requestId } });
+      } catch { return reply.code(503).send({ error: { message: "模型请求记录暂时不可用，请稍后重试", requestId } }); }
+    }
+    const finishUsage = async (details: Parameters<NonNullable<ChannelStore["completeModelUsage"]>>[0]) => {
+      if (!repository.completeModelUsage) return;
+      try { await repository.completeModelUsage(details); }
+      catch { app.log.error({ requestId }, "模型用量账本写入失败"); }
+    };
     const fetcher = modelGateway.fetcher ?? fetch;
-    const route = modelGateway.routeMode === "database"
-      ? await repository.resolveModelRoute?.("auto", session.clientVersion)
-      : modelGateway.staticModelId ? { providerModelId: modelGateway.staticModelId, endpoint: modelGateway.staticBaseUrl } : undefined;
-    if (!route) return reply.code(503).send({ error: { message: "当前没有可用的平台模型，请稍后重试" } });
-    let upstream: Response;
+    let routes: GatewayRoute[] = [];
     try {
-      upstream = await fetcher(`${route.endpoint.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { accept: "application/json, text/event-stream", authorization: `Bearer ${modelGateway.apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify({ ...input.data, model: route.providerModelId }),
-        signal: AbortSignal.timeout(15 * 60_000),
+      if (modelGateway.routeMode === "database") {
+        routes = repository.resolveModelRoutes ? await repository.resolveModelRoutes("auto", session.clientVersion) : [await repository.resolveModelRoute?.("auto", session.clientVersion)].filter(Boolean) as GatewayRoute[];
+      } else if (modelGateway.staticModelId) routes = [{ providerModelId: modelGateway.staticModelId, endpoint: modelGateway.staticBaseUrl }];
+    } catch {
+      await finishUsage({ requestId, status: "failed", attemptCount: 0, durationMs: Date.now() - startedAt, normalizedErrorCode: "route_resolution_failed" });
+      return reply.code(503).send({ error: { message: "模型路由暂时不可用，请稍后重试", requestId } });
+    }
+    if (!routes.length) {
+      await finishUsage({ requestId, status: "failed", attemptCount: 0, durationMs: Date.now() - startedAt, normalizedErrorCode: "no_eligible_route" });
+      return reply.code(503).send({ error: { message: "当前没有可用的平台模型，请稍后重试", requestId } });
+    }
+    let lastErrorCode = "upstream_unavailable";
+    for (let index = 0; index < routes.length; index += 1) {
+      const route = routes[index]!; const attemptCount = index + 1; let upstream: Response;
+      try {
+        upstream = await fetcher(`${route.endpoint.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: { accept: "application/json, text/event-stream", authorization: `Bearer ${modelGateway.apiKey}`, "content-type": "application/json", "x-niuma-request-id": requestId },
+          body: JSON.stringify(providerRequestBody(input.data, route.providerModelId)),
+          signal: AbortSignal.timeout(15 * 60_000),
+        });
+      } catch (error) {
+        lastErrorCode = error instanceof Error && error.name === "TimeoutError" ? "upstream_timeout" : "upstream_connection_failed";
+        if (route.id) await safeRouteFailure(repository, route.id);
+        if (index + 1 < routes.length) continue;
+        await finishUsage({ requestId, status: "failed", route, attemptCount, durationMs: Date.now() - startedAt, normalizedErrorCode: lastErrorCode });
+        return reply.code(502).send({ error: { message: "模型服务暂时无法连接，请稍后重试", requestId } });
+      }
+      const upstreamRequestId = upstream.headers.get("x-request-id") ?? upstream.headers.get("x-tt-logid") ?? undefined;
+      if (!upstream.ok || !upstream.body) {
+        const retryable = upstream.status === 429 || upstream.status >= 500;
+        lastErrorCode = upstream.status === 429 ? "upstream_rate_limited" : upstream.status >= 500 ? "upstream_server_error" : "upstream_rejected";
+        if (route.id && (retryable || upstream.status === 401 || upstream.status === 403)) await safeRouteFailure(repository, route.id);
+        try { await upstream.body?.cancel(); } catch { /* response is already being discarded */ }
+        if (retryable && index + 1 < routes.length) continue;
+        await finishUsage({ requestId, status: "failed", route, attemptCount, durationMs: Date.now() - startedAt, upstreamRequestId, normalizedErrorCode: lastErrorCode });
+        return reply.code(502).send({ error: { message: retryable ? "模型服务暂时不可用，请稍后重试" : "模型请求未被上游接受，请检查内容后重试", requestId } });
+      }
+      const contentType = upstream.headers.get("content-type") || "application/json";
+      reply.code(upstream.status).header("content-type", contentType);
+      if (upstreamRequestId) reply.header("x-upstream-request-id", upstreamRequestId.slice(0, 200));
+      const observed = observeModelStream(upstream.body, contentType, async (status, usage, errorCode) => {
+        if (route.id) {
+          if (status === "succeeded" && repository.recordModelRouteSuccess) {
+            try { await repository.recordModelRouteSuccess(route.id); } catch { app.log.warn({ requestId, routeId: route.id }, "模型路由成功状态写入失败"); }
+          } else if (status === "failed") await safeRouteFailure(repository, route.id);
+        }
+        const estimatedCostMicrounits = usage && hasPricing(route) ? estimateCostMicrounits(route, usage) : undefined;
+        await finishUsage({ requestId, status, route, usage, estimatedCostMicrounits, attemptCount, durationMs: Date.now() - startedAt, upstreamRequestId, normalizedErrorCode: errorCode });
       });
-    } catch { return reply.code(502).send({ error: { message: "模型服务暂时无法连接，请稍后重试" } }); }
-    if (!upstream.ok || !upstream.body) return reply.code(502).send({ error: { message: "模型服务暂时不可用，请稍后重试" } });
-    reply.code(upstream.status);
-    reply.header("content-type", upstream.headers.get("content-type") || "application/json");
-    const requestId = upstream.headers.get("x-request-id");
-    if (requestId) reply.header("x-request-id", requestId);
-    return reply.send(Readable.fromWeb(upstream.body as never));
+      return reply.send(observed);
+    }
+    await finishUsage({ requestId, status: "failed", attemptCount: routes.length, durationMs: Date.now() - startedAt, normalizedErrorCode: lastErrorCode });
+    return reply.code(502).send({ error: { message: "模型服务暂时不可用，请稍后重试", requestId } });
   });
 
   app.get("/v1/channels", safe(async (request: any) => { const deviceId = await authenticate(request); return { bindings: await repository.listBindings(deviceId) }; }) as never);
@@ -212,3 +263,37 @@ function requireAdmin(value: unknown, token: string | undefined) { if (!token) t
 function hashConfig(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function etagMatches(value: unknown, expected: string) { return String(value ?? "").split(",").some(tag => tag.trim().replace(/^W\//, "") === expected); }
 function adminWriteMeta(headers: Record<string, unknown>) { return { idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(headers["idempotency-key"]), actor: z.string().min(1).max(120).parse(headers["x-niuma-admin-actor"]) }; }
+async function safeRouteFailure(repository: ChannelStore, routeId: string) { try { await repository.recordModelRouteFailure?.(routeId); } catch { /* request failure remains authoritative even if circuit telemetry is unavailable */ } }
+function hasPricing(route: GatewayRoute): route is GatewayRoute & Pick<ModelRoute, "inputPriceMicrounitsPerMillion" | "outputPriceMicrounitsPerMillion" | "cachePriceMicrounitsPerMillion"> { return [route.inputPriceMicrounitsPerMillion, route.outputPriceMicrounitsPerMillion, route.cachePriceMicrounitsPerMillion].every(value => Number.isSafeInteger(value) && Number(value) >= 0); }
+function observeModelStream(body: ReadableStream<Uint8Array>, contentType: string, onComplete: (status: "succeeded" | "failed" | "cancelled", usage?: ModelUsage, errorCode?: string) => Promise<void>) {
+  const source = Readable.fromWeb(body as never); const chunks: Buffer[] = []; let capturedBytes = 0; let settled = false; const captureLimit = 2 * 1024 * 1024;
+  const settle = async (status: "succeeded" | "failed" | "cancelled", usage?: ModelUsage, errorCode?: string) => { if (settled) return; settled = true; await onComplete(status, usage, errorCode); };
+  const observer = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (capturedBytes < captureLimit) { const remaining = captureLimit - capturedBytes; chunks.push(value.subarray(0, remaining)); capturedBytes += Math.min(value.length, remaining); }
+      callback(null, chunk);
+    },
+    flush(callback) { void settle("succeeded", parseModelUsage(Buffer.concat(chunks).toString("utf8"), contentType)).then(() => callback(), () => callback()); },
+    destroy(error, callback) { void settle(error ? "failed" : "cancelled", undefined, error ? "upstream_stream_failed" : "client_cancelled").then(() => callback(error), () => callback(error)); },
+  });
+  source.on("error", error => observer.destroy(error));
+  return source.pipe(observer);
+}
+function parseModelUsage(payload: string, contentType: string): ModelUsage | undefined {
+  const candidates: unknown[] = [];
+  if (contentType.includes("text/event-stream")) {
+    for (const line of payload.split(/\r?\n/)) { const value = line.startsWith("data:") ? line.slice(5).trim() : ""; if (!value || value === "[DONE]") continue; try { candidates.push(JSON.parse(value)); } catch { /* incomplete or non-JSON event */ } }
+  } else { try { candidates.push(JSON.parse(payload)); } catch { return undefined; } }
+  for (let index = candidates.length - 1; index >= 0; index -= 1) { const usage = usageFromPayload(candidates[index]); if (usage) return usage; }
+  return undefined;
+}
+function usageFromPayload(value: unknown): ModelUsage | undefined {
+  if (!value || typeof value !== "object") return undefined; const usage = (value as { usage?: unknown }).usage; if (!usage || typeof usage !== "object") return undefined;
+  const record = usage as Record<string, unknown>; const details = record.prompt_tokens_details && typeof record.prompt_tokens_details === "object" ? record.prompt_tokens_details as Record<string, unknown> : {};
+  const inputTokens = tokenCount(record.input_tokens ?? record.prompt_tokens); const outputTokens = tokenCount(record.output_tokens ?? record.completion_tokens); const cachedInputTokens = tokenCount(record.cached_tokens ?? record.cache_read_input_tokens ?? details.cached_tokens) ?? 0;
+  if (inputTokens === undefined || outputTokens === undefined || cachedInputTokens > inputTokens) return undefined;
+  return { inputTokens, outputTokens, cachedInputTokens };
+}
+function tokenCount(value: unknown) { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
+function providerRequestBody(input: z.infer<typeof modelRequestSchema>, providerModelId: string) { return input.stream === true ? { ...input, model: providerModelId, stream_options: { include_usage: true } } : { ...input, model: providerModelId }; }

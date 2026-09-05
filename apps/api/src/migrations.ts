@@ -46,6 +46,29 @@ CREATE TABLE IF NOT EXISTS model_routes (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(logical_model_id,provider_model_id)
 );
 CREATE INDEX IF NOT EXISTS idx_model_route_resolution ON model_routes(logical_model_id,enabled,health,sort_order,fallback_priority);
+CREATE TABLE IF NOT EXISTS model_route_circuit_states (
+  route_id uuid PRIMARY KEY REFERENCES model_routes(id) ON DELETE CASCADE,
+  consecutive_failures integer NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+  circuit_open_until timestamptz, last_failure_at timestamptz, last_success_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO model_route_circuit_states(route_id) SELECT id FROM model_routes ON CONFLICT(route_id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS model_usage_ledger (
+  request_id uuid PRIMARY KEY, device_installation_id uuid NOT NULL REFERENCES device_installations(id) ON DELETE RESTRICT,
+  logical_model_id text NOT NULL, route_id uuid REFERENCES model_routes(id) ON DELETE SET NULL,
+  provider_model_id text, route_version bigint,
+  input_price_microunits_per_million bigint, output_price_microunits_per_million bigint, cache_price_microunits_per_million bigint,
+  input_tokens integer CHECK (input_tokens >= 0), output_tokens integer CHECK (output_tokens >= 0), cached_input_tokens integer CHECK (cached_input_tokens >= 0),
+  estimated_cost_microunits bigint CHECK (estimated_cost_microunits >= 0), usage_known boolean NOT NULL DEFAULT false,
+  status text NOT NULL CHECK (status IN ('running','succeeded','failed','cancelled')),
+  attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0), duration_ms integer CHECK (duration_ms >= 0),
+  upstream_request_id text, normalized_error_code text,
+  created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_model_usage_device_created ON model_usage_ledger(device_installation_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_usage_route_created ON model_usage_ledger(route_id,created_at DESC);
+UPDATE model_usage_ledger SET status='failed',normalized_error_code='gateway_interrupted',completed_at=now()
+  WHERE status='running' AND created_at<now()-interval '30 minutes';
 CREATE TABLE IF NOT EXISTS public_config_versions (
   version bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, config jsonb NOT NULL, etag text NOT NULL UNIQUE,
   created_at timestamptz NOT NULL DEFAULT now(), created_by text NOT NULL
